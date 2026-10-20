@@ -28,12 +28,21 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QStatusBar,
     QTextEdit,
     QVBoxLayout,
@@ -282,6 +291,230 @@ class CodeEditor(QPlainTextEdit):
         return None
 
 
+
+class FindReplaceDialog(QDialog):
+    """Поиск и замена: regex, учёт регистра, сторона (лево/право/оба)."""
+
+    def __init__(self, parent: "ParallelEditor"):
+        super().__init__(parent)
+        self.main = parent
+        self.setWindowTitle("Поиск и замена")
+        self.setMinimumWidth(480)
+        self._last_match_end = -1
+        self._last_editor = None
+
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.find_edit = QLineEdit()
+        self.find_edit.setPlaceholderText("Что искать…")
+        self.find_edit.returnPressed.connect(self.find_next)
+        form.addRow("Найти:", self.find_edit)
+
+        self.replace_edit = QLineEdit()
+        self.replace_edit.setPlaceholderText("На что заменить…")
+        self.replace_edit.returnPressed.connect(self.replace_one)
+        form.addRow("Заменить на:", self.replace_edit)
+        layout.addLayout(form)
+
+        opts = QHBoxLayout()
+        self.case_cb = QCheckBox("Учитывать регистр")
+        self.regex_cb = QCheckBox("Регулярное выражение")
+        opts.addWidget(self.case_cb)
+        opts.addWidget(self.regex_cb)
+        opts.addStretch()
+        layout.addLayout(opts)
+
+        side_row = QHBoxLayout()
+        side_row.addWidget(QLabel("Где:"))
+        self.scope = QComboBox()
+        self.scope.addItem("Активная панель", "focus")
+        self.scope.addItem("Оригинал (слева)", "en")
+        self.scope.addItem("Перевод (справа)", "ru")
+        self.scope.addItem("Обе панели", "both")
+        side_row.addWidget(self.scope, 1)
+        layout.addLayout(side_row)
+
+        btns = QHBoxLayout()
+        self.btn_next = QPushButton("Найти далее")
+        self.btn_next.clicked.connect(self.find_next)
+        self.btn_prev = QPushButton("Найти ранее")
+        self.btn_prev.clicked.connect(self.find_prev)
+        self.btn_repl = QPushButton("Заменить")
+        self.btn_repl.clicked.connect(self.replace_one)
+        self.btn_all = QPushButton("Заменить все")
+        self.btn_all.clicked.connect(self.replace_all)
+        btns.addWidget(self.btn_next)
+        btns.addWidget(self.btn_prev)
+        btns.addWidget(self.btn_repl)
+        btns.addWidget(self.btn_all)
+        layout.addLayout(btns)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color: #555;")
+        layout.addWidget(self.status)
+
+        close_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_box.rejected.connect(self.reject)
+        layout.addWidget(close_box)
+
+        self.find_edit.setFocus()
+
+    def _pattern(self):
+        raw = self.find_edit.text()
+        if not raw:
+            return None
+        flags = 0 if self.case_cb.isChecked() else re.IGNORECASE
+        if self.regex_cb.isChecked():
+            try:
+                return re.compile(raw, flags)
+            except re.error as e:
+                self.status.setText(f"Ошибка regex: {e}")
+                self.status.setStyleSheet("color: #c5221f;")
+                return None
+        return re.compile(re.escape(raw), flags)
+
+    def _editors(self):
+        mode = self.scope.currentData()
+        if mode == "en":
+            return [self.main.left_editor]
+        if mode == "ru":
+            return [self.main.right_editor]
+        if mode == "both":
+            return [self.main.left_editor, self.main.right_editor]
+        # focus
+        w = self.main.focusWidget()
+        if w is self.main.right_editor:
+            return [self.main.right_editor]
+        return [self.main.left_editor]
+
+    def _select_match(self, editor: CodeEditor, start: int, end: int) -> None:
+        cursor = editor.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        editor.centerCursor()
+        editor.setFocus()
+
+    def find_next(self) -> None:
+        self._find(forward=True)
+
+    def find_prev(self) -> None:
+        self._find(forward=False)
+
+    def _find(self, forward: bool = True) -> None:
+        pat = self._pattern()
+        if pat is None:
+            if self.find_edit.text():
+                return
+            self.status.setText("Введите строку поиска")
+            return
+
+        editors = self._editors()
+        # старт: после текущего совпадения / с курсора
+        for editor in editors:
+            text = editor.toPlainText()
+            cursor = editor.textCursor()
+            if forward:
+                start_at = cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
+                # если этот редактор не тот, с которого искали — с начала
+                if self._last_editor is not editor and len(editors) > 1:
+                    start_at = 0
+                m = pat.search(text, start_at)
+                if m is None and start_at > 0:
+                    m = pat.search(text, 0)  # wrap
+            else:
+                start_at = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+                # поиск назад: все совпадения до позиции
+                matches = list(pat.finditer(text))
+                m = None
+                for cand in reversed(matches):
+                    if cand.end() <= start_at and cand.start() < start_at:
+                        m = cand
+                        break
+                if m is None and matches:
+                    # wrap: последнее
+                    if matches[-1].start() < start_at or start_at == 0:
+                        m = matches[-1]
+                    elif matches:
+                        m = matches[-1]
+
+            if m is not None:
+                self._select_match(editor, m.start(), m.end())
+                self._last_editor = editor
+                self._last_match_end = m.end()
+                self.status.setText(f"Найдено: [{m.start()}–{m.end()}]")
+                self.status.setStyleSheet("color: #188038;")
+                return
+
+        self.status.setText("Ничего не найдено")
+        self.status.setStyleSheet("color: #c5221f;")
+
+    def replace_one(self) -> None:
+        pat = self._pattern()
+        if pat is None:
+            return
+        editors = self._editors()
+        for editor in editors:
+            cursor = editor.textCursor()
+            if cursor.hasSelection():
+                selected = cursor.selectedText().replace("\u2029", "\n")
+                m = pat.fullmatch(selected)
+                if m is not None:
+                    repl = self.replace_edit.text()
+                    if self.regex_cb.isChecked():
+                        try:
+                            new = m.expand(repl) if repl else ""
+                            # fullmatch expand: use sub on selected
+                            new = pat.sub(repl, selected, count=1)
+                        except re.error as e:
+                            self.status.setText(f"Ошибка замены: {e}")
+                            return
+                    else:
+                        new = repl
+                    cursor.insertText(new)
+                    self.status.setText("Заменено 1")
+                    self.status.setStyleSheet("color: #188038;")
+                    self.find_next()
+                    return
+        # нет выделенного совпадения — найти
+        self.find_next()
+
+    def replace_all(self) -> None:
+        pat = self._pattern()
+        if pat is None:
+            return
+        repl = self.replace_edit.text()
+        total = 0
+        for editor in self._editors():
+            text = editor.toPlainText()
+            try:
+                if self.regex_cb.isChecked():
+                    new_text, n = pat.subn(repl, text)
+                else:
+                    new_text, n = pat.subn(repl, text)
+            except re.error as e:
+                self.status.setText(f"Ошибка замены: {e}")
+                self.status.setStyleSheet("color: #c5221f;")
+                return
+            if n:
+                # сохранить позицию курсора
+                pos = editor.textCursor().position()
+                editor._syncing = True
+                editor.setPlainText(new_text)
+                c = editor.textCursor()
+                c.setPosition(min(pos, len(new_text)))
+                editor.setTextCursor(c)
+                editor._syncing = False
+                total += n
+        if total:
+            self.status.setText(f"Заменено: {total}")
+            self.status.setStyleSheet("color: #188038;")
+        else:
+            self.status.setText("Нечего заменять")
+            self.status.setStyleSheet("color: #c5221f;")
+
+
 class ParallelEditor(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -354,7 +587,44 @@ class ParallelEditor(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        edit_menu = menubar.addMenu("&Правка")
+        find_action = QAction("Найти…", self)
+        find_action.setShortcut(QKeySequence.StandardKey.Find)
+        find_action.triggered.connect(self._show_find)
+        edit_menu.addAction(find_action)
+
+        replace_action = QAction("Заменить…", self)
+        replace_action.setShortcut(QKeySequence.StandardKey.Replace)
+        replace_action.triggered.connect(self._show_find_replace)
+        edit_menu.addAction(replace_action)
+
+    def _show_find(self) -> None:
+        self._open_find_dialog(replace_mode=False)
+
+    def _show_find_replace(self) -> None:
+        self._open_find_dialog(replace_mode=True)
+
+    def _open_find_dialog(self, replace_mode: bool = True) -> None:
+        if not hasattr(self, "_find_dlg") or self._find_dlg is None:
+            self._find_dlg = FindReplaceDialog(self)
+        dlg = self._find_dlg
+        # если в выделении есть текст — подставить в поиск
+        w = self.focusWidget()
+        if isinstance(w, CodeEditor) and w.textCursor().hasSelection():
+            sel = w.textCursor().selectedText().replace("\u2029", "\n")
+            if sel and "\n" not in sel:
+                dlg.find_edit.setText(sel)
+        dlg.replace_edit.setEnabled(True)
+        dlg.btn_repl.setEnabled(True)
+        dlg.btn_all.setEnabled(True)
+        dlg.find_edit.setFocus()
+        dlg.find_edit.selectAll()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
     def _sync_paragraph(self, editor_idx: int, pos: int) -> None:
+
         """Рабочий алгоритм выравнивания абзацев по Y."""
         source = self.editors[editor_idx]
         target = self.editors[1 - editor_idx]
