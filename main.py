@@ -1,1004 +1,489 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
+"""
+Parallel Markdown Editor
+Редактор для параллельного перевода с синхронизацией по абзацам.
+Файлы: .en.md (оригинал, слева) и .ru.md (перевод, справа)
+"""
+
 import os
-import subprocess
+import re
 import sys
-import tempfile
-import tkinter as tk
-from tkinter import filedialog, messagebox
 
-from bnf_editor import BnfEditor
-from book_exporter import BookExporter
-from dialog_manager import DialogManager
-from line_numbers import LineNumbers
-from markdown_text import MarkdownText
-from replace_dialog import ReplaceDialog
-from search_dialog import SearchDialog
-from text_corrector import TextCorrector
-from toc_list import TOCList
-from tooltip import ToolTip
+from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QKeySequence,
+    QPainter,
+    QSyntaxHighlighter,
+    QTextCharFormat,
+    QTextCursor,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QMainWindow,
+    QPlainTextEdit,
+    QWidget,
+)
 
-TEMP_DIR = os.path.join(tempfile.gettempdir(), "paraline_editor")
-os.makedirs(TEMP_DIR, exist_ok=True)
 
-class TextFieldType:
-    LEFT = 1
-    RIGHT = 2
+class NumberBar(QWidget):
+    """Панель номеров строк слева от редактора."""
 
-class SideBySideEditor:
-    def __init__(self, root):
-        self.search_started = None
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+        self.setStyleSheet("background-color: #f0f0f0;")
 
-        self.root = root
-        self.root.title("Paraline")
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(event.rect(), QColor("#f0f0f0"))
+        painter.setPen(QColor("#888"))
+        painter.setFont(self.editor.font())
 
-        self.orig_path = ""
-        self.trans_path = ""
-        self.syncing = False
+        block = self.editor.firstVisibleBlock()
+        offset = self.editor.contentOffset()
+        block_rect = self.editor.blockBoundingGeometry(block).translated(offset)
+        top = int(block_rect.top())
+        bottom = int(block_rect.bottom())
+        block_number = block.blockNumber() + 1
+        line_height = self.editor.fontMetrics().height()
 
-        # Верхний фрейм с заголовком и кнопками
-        self.top_frame = tk.Frame(root)
-        self.top_frame.pack(fill=tk.X, padx=5, pady=5)
+        while block.isValid() and top <= bottom:
+            if block.isVisible():
+                painter.drawText(
+                    0,
+                    top,
+                    self.width() - 5,
+                    line_height,
+                    Qt.AlignRight | Qt.AlignVCenter,
+                    str(block_number),
+                )
+            block = block.next()
+            if block.isValid():
+                block_rect = self.editor.blockBoundingGeometry(block).translated(offset)
+                top = int(block_rect.top())
+            block_number += 1
 
-        # Заголовок с названием файла
-        self.file_title = tk.Label(
-            self.top_frame, text="Файл не загружен", font=("Arial", 12, "bold")
-        )
-        self.file_title.pack(side=tk.TOP, fill=tk.X)
-        # Привязываем клик левой кнопкой мыши к функции копирования
-        self.file_title.bind("<Button-1>", self.copy_to_clipboard)
 
-        # Фрейм для кнопок (в левом верхнем углу)
-        self.buttons_frame = tk.Frame(self.top_frame)
-        self.buttons_frame.pack(side=tk.LEFT, anchor="nw", pady=(5, 0))
+class MarkdownHighlighter(QSyntaxHighlighter):
+    """Подсветка Markdown + активной строки."""
 
-        ## Кнопки с иконками
+    def __init__(self, editor):
+        super().__init__(editor.document())
+        self.editor = editor
+        self.prev_block_number = -1
 
-        # load files
-        self.load_button = tk.Button(
-            self.buttons_frame,
-            text="📂",
-            command=self.load_md_pair_dialog,
-            font=("Noto Color Emoji", 12, "bold"),
-        )
-        self.load_button.pack(side=tk.LEFT, padx=(0, 5))
-        ToolTip(self.load_button, "Open File")
+        # Форматы markdown
+        self.heading_fmt = QTextCharFormat()
+        self.heading_fmt.setForeground(QColor("#0066cc"))
+        self.heading_fmt.setFontWeight(QFont.Bold)
 
-        # save files
-        self.save_button = tk.Button(
-            self.buttons_frame,
-            text="💾",
-            command=self.save_md_files,
-            font=("Noto Color Emoji", 12, "bold"),
-        )
-        self.save_button.pack(side=tk.LEFT, padx=(0, 5))
-        ToolTip(self.save_button, "Save Files")
+        self.bold_fmt = QTextCharFormat()
+        self.bold_fmt.setFontWeight(QFont.Bold)
 
-        # export files to book
-        self.export_book_menu_button = tk.Menubutton(
-            self.buttons_frame,
-            text="📖",
-            relief=tk.RAISED,
-            font=("Noto Color Emoji", 12),
-        )
-        self.export_book_menu = tk.Menu(
-            self.export_book_menu_button, tearoff=0, font=("Arial", 12, "bold")
-        )
-        ToolTip(self.export_book_menu_button, "Export Parallel Book")
+        self.italic_fmt = QTextCharFormat()
+        self.italic_fmt.setFontItalic(True)
 
-        # Список вариантов для выбора
-        self.export_variants = {
-            "Epub file (table)": "epub_table",
-            "Epub file (line by line)": "epub_list",
-            "Pdf file (table)": "pdf_table",
-            "Pdf file (line by line)": "pdf_list",
-        }
+        self.code_fmt = QTextCharFormat()
+        self.code_fmt.setForeground(QColor("#cc0000"))
+        self.code_fmt.setFontFamily("Consolas")
 
-        for label, key in self.export_variants.items():
-            self.export_book_menu.add_command(
-                label=label, command=lambda cmd=key: self.export_parallel_book(cmd)
-            )
+        self.link_fmt = QTextCharFormat()
+        self.link_fmt.setForeground(QColor("#0066cc"))
+        self.link_fmt.setUnderlineStyle(QTextCharFormat.SingleUnderline)
 
-        self.export_book_menu_button.config(menu=self.export_book_menu)
-        self.export_book_menu_button.pack(side=tk.LEFT, padx=(0, 5))
+        # Формат активной строки
+        self.active_fmt = QTextCharFormat()
+        self.active_fmt.setBackground(QColor("#fffacd"))
 
-        # translate en file
-        self.translate_original_button = tk.Menubutton(
-            self.buttons_frame,
-            text="🌐",
-            relief=tk.RAISED,
-            font=("Noto Color Emoji", 12),
-        )
-        self.translate_original_menu = tk.Menu(
-            self.translate_original_button, tearoff=0, font=("Arial", 12, "bold")
-        )
-        ToolTip(self.translate_original_button, "Translate En File With Browser")
+        # Regex правила
+        self.rules = [
+            (re.compile(r"^#{1,6}\s.+$"), "heading"),
+            (re.compile(r"\*\*(.+?)\*\*"), "bold"),
+            (re.compile(r"(?<!\*)\*([^\*]+?)\*(?!\*)"), "italic"),
+            (re.compile(r"`([^`]+)`"), "code"),
+            (re.compile(r"\[([^\]]+)\]\(([^\)]+)\)"), "link"),
+        ]
 
-        # Список вариантов для выбора
-        self.translate_variants = {
-            "Yandex Browser": "yandex-browser-stable",
-            "Google Chrome": "google-chrome-stable",
-        }
-
-        for label, key in self.translate_variants.items():
-            self.translate_original_menu.add_command(
-                label=label,
-                command=lambda cmd=key: self.open_original_with_browser(cmd),
-            )
-
-        self.translate_original_button.config(menu=self.translate_original_menu)
-        self.translate_original_button.pack(side=tk.LEFT, padx=(0, 5))
-
-        # reload files
-        self.reload_button = tk.Button(
-            self.buttons_frame,
-            text="🔄",
-            command=self.reload_md_files,
-            font=("Noto Color Emoji", 12, "bold"),
-        )
-        self.reload_button.pack(side=tk.LEFT, padx=(0, 5))
-        ToolTip(self.reload_button, "Reload Files")
-
-        self.info_button = tk.Button(
-            self.buttons_frame,
-            text="❕",
-            command=self.open_metadata_dialog,
-            font=("Noto Color Emoji", 12, "bold"),
-        )
-        self.info_button.pack(side=tk.LEFT, padx=(0, 5))
-        ToolTip(self.info_button, "File Info")
-
-        self.correct_button = tk.Button(
-            self.buttons_frame,
-            text="📝",
-            command=self.correct_text,
-            font=("Noto Color Emoji", 12, "bold"),
-        )
-        self.correct_button.pack(side=tk.LEFT, padx=(0, 5))
-        ToolTip(self.correct_button, "Correct text")
-
-        self.exit_button = tk.Button(
-            self.buttons_frame,
-            text="❌",
-            command=root.quit,
-            font=("Noto Color Emoji", 12, "bold"),
-        )
-        self.exit_button.pack(side=tk.LEFT)
-        ToolTip(self.exit_button, "Exit")
-
-        # Панель форматирования справа
-        self.format_frame = tk.Frame(self.top_frame)
-        self.format_frame.pack(side=tk.RIGHT, anchor="ne", pady=(5, 0))
-
-        self.bold_button = tk.Button(
-            self.format_frame,
-            text="**B**",
-            command=lambda: self.apply_format("bold"),
-            font=("Arial", 8, "bold"),
-        )
-        self.bold_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.bold_button, "bold format")
-
-        self.italic_button = tk.Button(
-            self.format_frame,
-            text="*I*",
-            command=lambda: self.apply_format("italic"),
-            font=("Arial", 8, "italic"),
-        )
-        self.italic_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.italic_button, "italic format")
-
-        self.bold_italic_button = tk.Button(
-            self.format_frame,
-            text="***B***",
-            command=lambda: self.apply_format("bold_italic"),
-            font=("Arial", 8, "bold italic"),
-        )
-        self.bold_italic_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.bold_italic_button, "bold italic format")
-
-        self.h1_button = tk.Button(
-            self.format_frame,
-            text="H1",
-            command=lambda: self.apply_format("h1"),
-            font=("Arial", 8),
-        )
-        self.h1_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.h1_button, "h1 title format")
-
-        self.h2_button = tk.Button(
-            self.format_frame,
-            text="H2",
-            command=lambda: self.apply_format("h2"),
-            font=("Arial", 8),
-        )
-        self.h2_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.h2_button, "h2 title format")
-
-        self.h3_button = tk.Button(
-            self.format_frame,
-            text="H3",
-            command=lambda: self.apply_format("h3"),
-            font=("Arial", 8),
-        )
-        self.h3_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.h3_button, "h3 title format")
-
-        self.h4_button = tk.Button(
-            self.format_frame,
-            text="H4",
-            command=lambda: self.apply_format("h4"),
-            font=("Arial", 8),
-        )
-        self.h4_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.h4_button, "h4 title format")
-
-        self.h5_button = tk.Button(
-            self.format_frame,
-            text="H5",
-            command=lambda: self.apply_format("h5"),
-            font=("Arial", 8),
-        )
-        self.h5_button.pack(side=tk.LEFT, padx=2)
-        ToolTip(self.h5_button, "h5 title format")
-
-        # Основной контейнер
-        container = tk.Frame(root)
-        container.pack(fill=tk.BOTH, expand=True)
-
-        # Создаем фреймы для каждого редактора с номерами строк
-        # Левый редактор с оглавлением и номерами строк
-        left_editor_frame = tk.Frame(container)
-        left_editor_frame.grid(row=0, column=0, sticky="nsew")
-
-        # Панель с кнопкой для левого TOC
-        left_top_panel = tk.Frame(left_editor_frame)
-        left_top_panel.pack(side=tk.TOP, fill=tk.X)
-        self.toggle_left_toc_button = tk.Button(
-            left_top_panel,
-            text="👈",
-            command=self.toggle_left_toc,
-            font=("Noto Color Emoji", 10),
-        )
-        self.toggle_left_toc_button.pack(side=tk.LEFT, anchor="w", padx=2, pady=2)
-
-        self.left_jump_entry = tk.Entry(left_top_panel, width=8)
-        self.left_jump_entry.pack(side=tk.LEFT, pady=2)
-        self.left_jump_entry.bind(
-            "<Return>", lambda e: self.jump_to_line(self.left_jump_entry)
-        )
-        self.left_jump_entry_button = tk.Button(
-            left_top_panel,
-            text="Go",
-            command=lambda: self.jump_to_line(self.left_jump_entry),
-            font=("Noto Color Emoji", 10),
-        )
-        self.left_jump_entry_button.pack(side=tk.LEFT, anchor="w")
-        self.left_search_button = tk.Button(
-            left_top_panel,
-            text="🔎",
-            command=self.on_left_search,
-            font=("Noto Color Emoji", 10),
-        )
-        ToolTip(self.left_search_button, "Search")
-        self.left_search_button.pack(side=tk.LEFT, anchor="w")
-
-        self.left_replace_button = tk.Button(
-            left_top_panel,
-            text="✏",
-            command=self.on_left_replace,
-            font=("Noto Color Emoji", 10),
-        )
-        ToolTip(self.left_replace_button, "Replace")
-        self.left_replace_button.pack(side=tk.LEFT, anchor="w")
-
-        # Основная часть левого редактора
-        self.left_frame = tk.Frame(left_editor_frame)
-        self.left_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self.left_text = MarkdownText(self.left_frame, wrap="word")
-        self.left_scroll = tk.Scrollbar(self.left_frame, command=self.on_scroll_left)
-
-        # Левый редактор с оглавлением
-        self.left_toc = TOCList(self.left_frame, self.left_text)
-        self.left_toc_scroll = tk.Scrollbar(
-            self.left_frame, orient=tk.VERTICAL, command=self.left_toc.yview
-        )
-        self.left_toc.configure(yscrollcommand=self.left_toc_scroll.set)
-        self.left_toc.pack(side=tk.LEFT, fill=tk.Y)
-        self.left_toc_scroll.pack(side=tk.LEFT, fill=tk.Y)
-
-        self.left_text.bind("<<Modified>>", self.on_left_text_modified)
-        self.left_text.edit_modified(False)
-
-        # Фрейм для номеров строк + поле перехода
-        left_num_frame = tk.Frame(self.left_frame)
-        left_num_frame.pack(side=tk.LEFT, fill=tk.Y)
-
-        self.left_line_numbers = LineNumbers(left_num_frame, width=50)
-        self.left_line_numbers.pack(side=tk.TOP, fill=tk.Y, expand=True)
-        self.left_line_numbers.attach(self.left_text)
-
-        self.left_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Правый редактор
-        right_editor_frame = tk.Frame(container)
-        right_editor_frame.grid(row=0, column=2, sticky="nsew")
-
-        # Панель с кнопкой для правого TOC
-        right_top_panel = tk.Frame(right_editor_frame)
-        right_top_panel.pack(side=tk.TOP, fill=tk.X)
-        self.toggle_right_toc_button = tk.Button(
-            right_top_panel,
-            text="👉",
-            command=self.toggle_right_toc,
-            font=("Noto Color Emoji", 10),
-        )
-        self.toggle_right_toc_button.pack(side=tk.RIGHT, anchor="e", padx=2, pady=2)
-
-        self.right_replace_button = tk.Button(
-             right_top_panel,
-             text="✏",
-             command=self.on_right_replace,
-             font=("Noto Color Emoji", 10),
-         )
-        ToolTip(self.right_replace_button, "Replace")
-        self.right_replace_button.pack(side=tk.RIGHT)
-
-        self.right_search_button = tk.Button(
-            right_top_panel,
-            text="🔎",
-            command=self.on_right_search,
-            font=("Noto Color Emoji", 10),
-        )
-        ToolTip(self.right_search_button, "Search")
-        self.right_search_button.pack(side=tk.RIGHT)
-
-        # Основная часть правого редактора
-        self.right_frame = tk.Frame(right_editor_frame)
-        self.right_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        right_num_frame = tk.Frame(self.right_frame)
-        right_num_frame.pack(side=tk.LEFT, fill=tk.Y)
-
-        self.right_line_numbers = LineNumbers(right_num_frame, width=40)
-        self.right_line_numbers.pack(side=tk.TOP, fill=tk.Y, expand=True)
-
-        self.right_text = MarkdownText(self.right_frame, wrap="word")
-        self.right_line_numbers.attach(self.right_text)
-        self.right_scroll = tk.Scrollbar(self.right_frame, command=self.on_scroll_right)
-
-        self.right_toc = TOCList(self.right_frame, self.right_text)
-        self.right_toc_scroll = tk.Scrollbar(
-            self.right_frame, orient=tk.VERTICAL, command=self.right_toc.yview
-        )
-        self.right_toc.configure(yscrollcommand=self.right_toc_scroll.set)
-        self.right_toc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.right_toc.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.right_text.bind("<<Modified>>", self.on_righ_text_modified)
-        self.right_text.edit_modified(False)
-
-        self.right_text.bind("<<Paste>>", lambda e: self.update_right_text_async())
-        self.right_text.bind("<<Cut>>", lambda e: self.update_right_text_async())
-
-        self.left_text.bind("<<Paste>>", lambda e: self.update_left_text_async())
-        self.left_text.bind("<<Cut>>", lambda e: self.update_left_text_async())
-
-        self.right_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.right_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Скрыть TOC по умолчанию
-        # self.init_toc_state()
-
-        container.grid_rowconfigure(0, weight=1)
-        container.grid_columnconfigure(0, weight=1)
-        container.grid_columnconfigure(2, weight=1)
-
-        # Подсветка строки с курсором
-        self.left_text.tag_configure(
-            "current_line", background="#e7ff00", selectbackground="#77b8ff"
-        )
-        self.right_text.tag_configure(
-            "current_line", background="#e7ff00", selectbackground="#77b8ff"
+    def highlightBlock(self, text):
+        is_active = (
+            self.currentBlock().blockNumber()
+            == self.editor.textCursor().block().blockNumber()
         )
 
-        self.left_text.bind("<ButtonRelease-1>", self.highlight_current_line_left)
-        self.right_text.bind("<ButtonRelease-1>", self.highlight_current_line_right)
+        n = len(text)
+        formats = [None] * n
 
-        self.left_text.bind("<Up>", self.highlight_current_line_left)
-        self.right_text.bind("<Up>", self.highlight_current_line_right)
+        # Применяем markdown правила
+        for pattern, fmt_name in self.rules:
+            for match in pattern.finditer(text):
+                fmt = getattr(self, f"{fmt_name}_fmt")
+                if fmt_name == "bold":
+                    start, end = match.start() + 2, match.end() - 2
+                elif fmt_name in ("italic", "code"):
+                    start, end = match.start() + 1, match.end() - 1
+                else:
+                    start, end = match.start(), match.end()
+                for i in range(max(0, start), min(n, end)):
+                    formats[i] = fmt
 
-        self.left_text.bind("<Down>", self.highlight_current_line_left)
-        self.right_text.bind("<Down>", self.highlight_current_line_right)
+        # Применяем фон активной строки
+        if is_active:
+            for i in range(n):
+                if formats[i] is None:
+                    formats[i] = self.active_fmt
+                else:
+                    combined = QTextCharFormat(formats[i])
+                    combined.setBackground(self.active_fmt.background())
+                    formats[i] = combined
 
-        self.left_text.bind("<Left>", self.highlight_current_line_left)
-        self.right_text.bind("<Left>", self.highlight_current_line_right)
-
-        self.left_text.bind("<Right>", self.highlight_current_line_left)
-        self.right_text.bind("<Right>", self.highlight_current_line_right)
-
-        root.bind("<Control-s>", lambda event: self.save_md_files())
-        root.bind("<Control-o>", lambda event: self.load_md_pair_dialog())
-
-        self.left_text.configure(yscrollcommand=self.on_text_scroll_left)
-        self.right_text.configure(yscrollcommand=self.on_text_scroll_right)
-
-        root.bind("<Control-f>", self.on_ctrl_f)
-        root.bind("<Control-r>", self.on_ctrl_r)
-
-        if len(sys.argv) > 1:
-            file_path = sys.argv[1]
-            self.load_md_pair(file_path)
-
-    def update_right_text_async(self):
-        self.right_text.after(300, self.update_right_text)
-
-    def update_right_text(self):
-        self.right_text.schedule_highlight_markdown()
-        self.right_toc.schedule_update()
-
-    def update_left_text_async(self):
-        self.left_text.after(300, self.update_left_text)
-
-    def update_left_text(self):
-        self.left_text.schedule_highlight_markdown()
-        self.left_toc.schedule_update()
-
-    def on_righ_text_modified(self, *args):
-        self.right_text.on_text_modified()
-        line = int(self.right_text.index("insert").split(".")[0])
-        text = self.right_text.get(f"{line}.0", f"{line}.end").lstrip()
-        if text.startswith("#"):
-            self.right_toc.schedule_update()
-        elif self.right_toc.check_contains_text(text):
-            self.right_toc.schedule_update()
-
-    def on_left_text_modified(self, *args):
-        self.left_text.on_text_modified()
-        line = int(self.left_text.index("insert").split(".")[0])
-        text = self.left_text.get(f"{line}.0", f"{line}.end").lstrip()
-        if text.startswith("#"):
-            self.left_toc.schedule_update()
-        elif self.left_toc.check_contains_text(text):
-            self.left_toc.schedule_update()
-
-    def open_metadata_dialog(self):
-        if not self.orig_path:
-            DialogManager.show_dialog("Ошибка", "Сначала откройте файл.")
-            return
-        BnfEditor(self.orig_path)
-
-    def on_ctrl_f(self, event):
-        # определяем, в каком текстовом поле был фокус при нажатии
-        text_frame = self.root.focus_get()
-        self.open_search_dialog(text_frame)
-
-    def on_ctrl_r(self, event):
-        # определяем, в каком текстовом поле был фокус при нажатии
-        text_frame = self.root.focus_get()
-        self.open_replace_dialog(text_frame)
-
-    def on_left_search(self):
-        self.open_search_dialog(self.left_text)
-
-    def on_left_replace(self):
-        self.open_replace_dialog(self.left_text)
-
-    def on_right_search(self):
-        self.open_search_dialog(self.right_text)
-
-    def on_right_replace(self):
-        self.open_replace_dialog(self.right_text)
-
-    def open_search_dialog(self, text_frame):
-        SearchDialog(self.root, text_frame)
-
-    def open_replace_dialog(self, text_frame):
-        ReplaceDialog(self.root, text_frame)
-
-    def correct_text(self):
-        self.left_text_corrector = TextCorrector(self.left_text)
-        self.left_text_corrector.correct_text(self.orig_path)
-        self.left_toc.schedule_update()
-
-        self.right_text_corrector = TextCorrector(self.right_text)
-        self.right_text_corrector.correct_text(self.trans_path)
-        self.right_toc.schedule_update()
-
-    def on_text_scroll_left(self, *args):
-        self.left_line_numbers.redraw()
-        self.left_scroll.set(args[0], args[1])
-
-    def on_text_scroll_right(self, *args):
-        self.right_line_numbers.redraw()
-        self.right_scroll.set(args[0], args[1])
-
-    def copy_to_clipboard(self, event=None):
-        # Очищаем буфер обмена и копируем текст метки
-        root.clipboard_clear()
-        root.clipboard_append(self.file_title.cget("text"))
-
-    def jump_to_line(self, entry_widget):
-        try:
-            line_num = int(entry_widget.get())
-
-            self.left_text.mark_set("insert", f"{line_num}.0")
-            self.left_text.see(f"{line_num}.0")
-
-            self.right_text.mark_set("insert", f"{line_num}.0")
-            self.right_text.see(f"{line_num}.0")
-
-            self.left_text.focus_set()
-
-        except ValueError:
-            pass
-
-    def init_toc_state(self):
-        # Скрываем TOC по умолчанию
-        self.left_toc.pack_forget()
-        self.right_toc.pack_forget()
-        # Иконки в начальном состоянии
-        self.toggle_left_toc_button.config(text="📑")
-        self.toggle_right_toc_button.config(text="📑")
-
-    def toggle_left_toc(self):
-        if self.left_toc.winfo_ismapped():
-            self.left_toc.pack_forget()
-            self.left_toc_scroll.pack_forget()
-            self.toggle_left_toc_button.config(text="📑")  # скрыт
-        else:
-            self.left_toc = TOCList(self.left_frame, None)
-            self.left_toc_scroll = tk.Scrollbar(
-                self.left_frame, orient=tk.VERTICAL, command=self.left_toc.yview
-            )
-            self.left_toc.configure(yscrollcommand=self.left_toc_scroll.set)
-            self.left_toc_scroll.pack(
-                side=tk.LEFT, fill=tk.Y, before=self.left_line_numbers
-            )
-            self.left_toc.pack(side=tk.LEFT, fill=tk.Y, before=self.left_toc_scroll)
-
-            self.left_toc.text_widget = self.left_text
-            self.left_toc.update_toc()
-            self.toggle_left_toc_button.config(text="👈")  # показан
-
-    def toggle_right_toc(self):
-        if self.right_toc.winfo_ismapped():
-            self.right_toc.pack_forget()
-            self.right_toc_scroll.pack_forget()
-            self.toggle_right_toc_button.config(text="📑")  # скрыт
-        else:
-            self.right_toc = TOCList(self.right_frame, None)
-            self.right_toc_scroll = tk.Scrollbar(
-                self.right_frame, orient=tk.VERTICAL, command=self.right_toc.yview
-            )
-            self.right_toc.configure(yscrollcommand=self.right_toc_scroll.set)
-            self.right_toc_scroll.pack(
-                side=tk.RIGHT, fill=tk.Y, after=self.right_scroll
-            )
-            self.right_toc.pack(side=tk.RIGHT, fill=tk.Y, before=self.right_toc_scroll)
-            self.right_toc.update_toc()
-            self.toggle_right_toc_button.config(text="👉")  # показан
-
-    def apply_format(self, style):
-        widget = self.root.focus_get()
-        if widget == self.left_text:
-            self.left_text.format_line(style)
-        elif widget == self.right_text:
-            self.right_text.format_line(style)
-
-    def on_scroll_left(self, *args):
-        self.left_text.yview(*args)
-        self.left_line_numbers.redraw()
-        self.left_scroll.set(*args)  # фикс положения ползунка
-
-    def on_scroll_right(self, *args):
-        self.right_text.yview(*args)
-        self.right_line_numbers.redraw()
-        self.right_scroll.set(*args)
-
-    def update_file_title(self):
-        """Обновляет заголовок с названием файла"""
-        if self.orig_path:
-            filename, _ = os.path.splitext(os.path.basename(self.orig_path))
-            base_name = filename.replace(".en", "")
-            self.file_title.config(text=f"{base_name}")
-            self.root.title(base_name)
-        elif self.trans_path:
-            filename, _ = os.path.splitext(os.path.basename(self.trans_path))
-            base_name = filename.replace(".ru", "")
-            self.file_title.config(text=f"{base_name}")
-            self.root.title(base_name)
-        else:
-            self.file_title.config(text="Файл не загружен")
-            self.root.title("Paraline")
-
-    def save_text_to_file(self, text_widget, path):
-        content = text_widget.get("1.0", "end-1c")
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-    def create_temp_md_from_text(self, lang):
-        filename = f"temporary.{lang}.md"
-        path = os.path.join(TEMP_DIR, filename)
-
-        content = self.left_text.get("1.0", "end-1c")
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-        return path
-
-    def open_original_with_browser(self, app):
-        """Открывает оригинальный .en.md файл выбранной программой"""
-        try:
-            en_path = None
-
-            if self.orig_path and self.orig_path.endswith(".en.md"):
-                en_path = self.orig_path
-            elif self.trans_path and self.trans_path.endswith(".en.md"):
-                en_path = self.trans_path
-
-            # 🔹 ЕСЛИ НЕТ — СОЗДАЁМ ВРЕМЕННЫЙ
-            if not en_path or not os.path.exists(en_path):
-                en_path = self.create_temp_md_from_text("en")
+        # Применяем форматы
+        i = 0
+        while i < n:
+            if formats[i] is not None:
+                j = i
+                while j < n and formats[j] is not None and formats[j] == formats[i]:
+                    j += 1
+                self.setFormat(i, j - i, formats[i])
+                i = j
             else:
-                # 🔹 обновляем существующий файл перед открытием
-                self.save_text_to_file(self.left_text, en_path)
+                i += 1
 
-            subprocess.Popen([app, en_path])
 
-        except Exception as e:
-            DialogManager.show_dialog(
-                "Ошибка открытия", f"Не удалось открыть файл: {str(e)}"
+class CodeEditor(QPlainTextEdit):
+    """Редактор с номерами строк, подсветкой и синхронизацией."""
+
+    paragraph_clicked = Signal(int, int)  # editor_idx, cursor_position
+
+    def __init__(self, editor_idx=0):
+        super().__init__()
+        self.editor_idx = editor_idx
+        self._syncing = False
+        self._mouse_click = False
+
+        self.number_bar = NumberBar(self)
+        self.highlighter = MarkdownHighlighter(self)
+
+        font = QFont("Consolas", 11)
+        font.setStyleHint(QFont.Monospace)
+        self.setFont(font)
+
+        self.cursorPositionChanged.connect(self._on_cursor_changed)
+        self.blockCountChanged.connect(self._update_number_bar_width)
+        self.updateRequest.connect(self._update_number_bar)
+
+        self._update_number_bar_width()
+
+    def mousePressEvent(self, event):
+        """Отслеживаем клик мышью для синхронизации."""
+        self._mouse_click = True
+        super().mousePressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.number_bar.setGeometry(QRect(cr.left(), cr.top(),
+                                          self.number_bar.width(), cr.height()))
+
+    def _update_number_bar_width(self):
+        digits = len(str(max(1, self.blockCount())))
+        width = self.fontMetrics().horizontalAdvance('9') * (digits + 1) + 10
+        self.number_bar.setFixedWidth(width)
+        # Устанавливаем margins, чтобы текст не залезал под номера
+        self.setViewportMargins(width, 0, 0, 0)
+        cr = self.contentsRect()
+        self.number_bar.setGeometry(QRect(cr.left(), cr.top(), width, cr.height()))
+
+    def _update_number_bar(self, rect, dy):
+        if dy:
+            self.number_bar.scroll(0, dy)
+        else:
+            self.number_bar.update(0, rect.y(), self.number_bar.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_number_bar_width()
+
+    def _on_cursor_changed(self):
+        """Перерисовываем подсветку активной строки."""
+        cursor = self.textCursor()
+        current_block = cursor.block()
+
+        if self.highlighter.prev_block_number >= 0:
+            prev_block = self.document().findBlockByNumber(
+                self.highlighter.prev_block_number
             )
+            if prev_block.isValid():
+                self.highlighter.rehighlightBlock(prev_block)
 
-    def reload_md_files(self):
-        """Перезагружает содержимое оригинального и переведённого файла с диска"""
-        if not self.orig_path or not self.trans_path:
-            DialogManager.show_dialog("Ошибка", "Файлы не загружены")
+        self.highlighter.rehighlightBlock(current_block)
+        self.highlighter.prev_block_number = current_block.blockNumber()
+
+        # Синхронизация только при клике мышью
+        if self._mouse_click:
+            self._mouse_click = False
+            if not self._syncing:
+                self._select_paragraph()
+                pos = self.textCursor().position()
+                self.paragraph_clicked.emit(self.editor_idx, pos)
+
+    def _select_paragraph(self):
+        """Выделяет весь абзац целиком."""
+        cursor = self.textCursor()
+        pos = cursor.position()
+        block = self.document().findBlock(pos)
+        if not block.isValid():
             return
 
-        try:
-            # Сохраняем текущую прокрутку
-            left_scroll_pos = self.left_text.yview()[0]
-            right_scroll_pos = self.right_text.yview()[0]
+        # Находим начало абзаца
+        start_block = block
+        while (
+            start_block.previous().isValid() and start_block.previous().text().strip()
+        ):
+            start_block = start_block.previous()
 
-            with open(self.orig_path, "r", encoding="utf-8") as f:
-                original_lines = f.read()
-            with open(self.trans_path, "r", encoding="utf-8") as f:
-                translation_lines = f.read()
+        # Находим конец абзаца
+        end_block = block
+        while end_block.next().isValid() and end_block.next().text().strip():
+            end_block = end_block.next()
 
-            self.left_text.delete("1.0", tk.END)
-            self.right_text.delete("1.0", tk.END)
+        # Выделяем диапазон
+        cursor.setPosition(start_block.position())
+        cursor.setPosition(
+            end_block.position() + len(end_block.text()), QTextCursor.KeepAnchor
+        )
+        self.setTextCursor(cursor)
 
-            self.left_text.insert(tk.END, original_lines)
-            self.right_text.insert(tk.END, translation_lines)
+    def get_paragraph_index(self, pos):
+        """Возвращает индекс абзаца по позиции курсора."""
+        block = self.document().findBlock(pos)
+        if not block.isValid():
+            return -1
 
-            self.left_text.highlight_markdown()
-            self.right_text.highlight_markdown()
+        start_block = block
+        while (
+            start_block.previous().isValid() and start_block.previous().text().strip()
+        ):
+            start_block = start_block.previous()
 
-            self.left_toc.schedule_update()
-            self.right_toc.schedule_update()
+        idx = 0
+        b = self.document().begin()
+        in_para = False
+        while b.isValid():
+            text = b.text()
+            if text.strip():
+                if not in_para:
+                    in_para = True
+                    if b == start_block:
+                        return idx
+                    idx += 1
+            else:
+                in_para = False
+            b = b.next()
+        return -1
 
-            # Восстанавливаем прокрутку
-            self.left_text.update_idletasks()  # опционально, но помогает
-            self.root.after_idle(lambda: self.left_text.yview_moveto(left_scroll_pos))
-            self.right_text.update_idletasks()  # опционально, но помогает
-            self.root.after_idle(lambda: self.right_text.yview_moveto(right_scroll_pos))
+    def get_paragraph_position(self, idx):
+        """Возвращает позицию начала абзаца с индексом idx."""
+        count = 0
+        b = self.document().begin()
+        in_para = False
+        while b.isValid():
+            text = b.text()
+            if text.strip():
+                if not in_para:
+                    in_para = True
+                    if count == idx:
+                        return b.position()
+                    count += 1
+            else:
+                in_para = False
+            b = b.next()
+        return None
 
-            DialogManager.show_dialog("Готово", "Файлы перезагружены с диска.")
 
-        except Exception as e:
-            DialogManager.show_dialog("Ошибка загрузки", str(e))
+class ParallelEditor(QMainWindow):
+    """Главное окно с двумя редакторами."""
 
-    def load_md_pair_dialog(self):
-        file_path = filedialog.askopenfilename(
-            title="Выбери .en.md или .ru.md", filetypes=[("Markdown", "*.md")]
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Parallel Markdown Editor")
+        self.resize(1400, 800)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self.left_editor = CodeEditor(0)
+        self.right_editor = CodeEditor(1)
+
+        layout.addWidget(self.left_editor)
+        layout.addWidget(self.right_editor)
+
+        self.editors = [self.left_editor, self.right_editor]
+
+        # Синхронизация
+        self.left_editor.paragraph_clicked.connect(self._sync_paragraph)
+        self.right_editor.paragraph_clicked.connect(self._sync_paragraph)
+
+        self._create_menu()
+        self.current_file_base = None
+
+    def _create_menu(self):
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("File")
+
+        open_action = QAction("Open...", self)
+        open_action.setShortcut(QKeySequence.Open)
+        open_action.triggered.connect(self._open_files)
+        file_menu.addAction(open_action)
+
+        save_action = QAction("Save", self)
+        save_action.setShortcut(QKeySequence.Save)
+        save_action.triggered.connect(self._save_files)
+        file_menu.addAction(save_action)
+
+        file_menu.addSeparator()
+
+        quit_action = QAction("Quit", self)
+        quit_action.setShortcut(QKeySequence.Quit)
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+    def _open_files(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open .en.md file",
+            "",
+            "Markdown Files (*.en.md *.ru.md);;All Files (*)",
         )
         if not file_path:
             return
-        self.load_md_pair(file_path)
 
-    def load_md_pair(self, file_path):
-        base_name, lang_ext = os.path.splitext(file_path)
-        base_name, lang = os.path.splitext(base_name)
-
-        if lang not in (".en", ".ru"):
-            DialogManager.show_dialog(
-                "Ошибка", "Файл должен заканчиваться на .en.md или .ru.md"
-            )
-            return
-
-        other_lang = ".ru" if lang == ".en" else ".en"
-        orig_lang = lang
-        trans_lang = other_lang
-
-        orig_path = base_name + orig_lang + ".md"
-        trans_path = base_name + trans_lang + ".md"
-
-        if lang == ".en":
-            self.orig_path = orig_path
-            self.trans_path = trans_path
+        if file_path.endswith(".en.md"):
+            base = file_path[:-6]
+        elif file_path.endswith(".ru.md"):
+            base = file_path[:-6]
         else:
-            self.orig_path = trans_path
-            self.trans_path = orig_path
+            base = file_path
 
-        try:
-            if os.path.exists(self.orig_path):
-                with open(self.orig_path, "r", encoding="utf-8") as f:
-                    original_lines = f.read()
-            else:
-                original_lines = ""
-            if os.path.exists(self.trans_path):
-                with open(self.trans_path, "r", encoding="utf-8") as f:
-                    translation_lines = f.read()
-            else:
-                translation_lines = ""
+        self.current_file_base = base
+        self._load_files()
 
-            self.left_text.delete("1.0", tk.END)
-            self.right_text.delete("1.0", tk.END)
+    def _load_files(self):
+        en_path = self.current_file_base + ".en.md"
+        ru_path = self.current_file_base + ".ru.md"
 
-            self.left_text.insert(tk.END, original_lines)
-            self.right_text.insert(tk.END, translation_lines)
+        self.left_editor._syncing = True
+        self.right_editor._syncing = True
 
-            self.left_text.highlight_markdown()
-            self.right_text.highlight_markdown()
-
-            self.left_text.mark_set("insert", "1.0")  # ставим курсор в начало
-            self.left_text.see("insert")
-            self.left_text.focus_set()
-
-            self.left_toc.schedule_update()
-            self.right_toc.schedule_update()
-
-            # Обновляем заголовок после загрузки файлов
-            self.update_file_title()
-
-        except Exception as e:
-            DialogManager.show_dialog("Ошибка", str(e))
-
-        # 🔹 ЕСЛИ ФАЙЛА ПЕРЕВОДА НЕТ
-        if not os.path.exists(trans_path):
-            answer = messagebox.askyesno(
-                "Файл не найден",
-                f"Файл перевода не найден:\n{trans_path}\n\nСоздать его?",
-            )
-
-            if not answer:
-                return
-
-            # 🔹 СОЗДАЁМ ФАЙЛ
-            try:
-                self.trans_path = trans_path
-                with open(trans_path, "w", encoding="utf-8") as f:
-                    f.write("")  # можно добавить шаблон
-            except Exception as e:
-                messagebox.showerror("Ошибка", str(e))
-                return
-
-    def edit_translate(self):
-        """Открывает файл перевода .ru.md в mousepad"""
-        if not self.orig_path:
-            DialogManager.show_dialog("Ошибка", "Файлы не загружены")
-            return
-
-        try:
-            # Определяем путь к файлу перевода
-            ru_path = ""
-            if self.orig_path.endswith(".ru.md"):
-                ru_path = self.orig_path
-            elif self.trans_path.endswith(".ru.md"):
-                ru_path = self.trans_path
-            else:
-                DialogManager.show_dialog("Ошибка", "Русский файл не найден")
-                return
-
-            # Запускаем Ghostwriter с этим файлом
-            subprocess.Popen(["mousepad", ru_path])
-
-        except Exception as e:
-            DialogManager.show_dialog(
-                "Ошибка предпросмотра", f"Не удалось открыть файл: {str(e)}"
-            )
-
-    def sync_cursor_left(self, event=None):
-        if self.syncing:
-            return
-        self.syncing = True
-        try:
-            # Получаем номер текущей строки в левом поле
-            index = self.left_text.index("insert")
-            line_num = index.split(".")[0]
-
-            # Устанавливаем курсор в правом поле на ту же строку
-            self.right_text.mark_set("insert", f"{line_num}.0")
-
-            # Выравниваем строки параллельно
-            self.align_lines_parallel(line_num, TextFieldType.LEFT)
-        finally:
-            self.syncing = False
-
-    def sync_cursor_right(self):
-        if self.syncing:
-            return
-        self.syncing = True
-        try:
-            # Получаем номер текущей строки в правом поле
-            index = self.right_text.index("insert")
-            line_num = index.split(".")[0]
-
-            # Устанавливаем курсор в левом поле на ту же строку
-            self.left_text.mark_set("insert", f"{line_num}.0")
-
-            # Выравниваем строки параллельно
-            self.align_lines_parallel(line_num, TextFieldType.RIGHT)
-        finally:
-            self.syncing = False
-
-    def align_lines_parallel(self, line_num, text_field_type):
-        try:
-            # Показываем строку в центре каждого виджета
-            self.left_text.see(f"{line_num}.0")
-            self.right_text.see(f"{line_num}.0")
-
-            self.root.update_idletasks()
-
-            if text_field_type == TextFieldType.LEFT:
-                cursor_pos = self.left_text.index(tk.INSERT)
-                bbox = self.left_text.bbox(cursor_pos)
-                if bbox:
-                    y_pixel = bbox[1]
-                    # Передаём реальный индекс позиции курсора, а не начало строки
-                    self.adjust_scroll_to_position(self.right_text, cursor_pos, y_pixel)
-            elif text_field_type == TextFieldType.RIGHT:
-                cursor_pos = self.right_text.index(tk.INSERT)
-                bbox = self.right_text.bbox(cursor_pos)
-                if bbox:
-                    y_pixel = bbox[1]
-                    self.adjust_scroll_to_position(self.left_text, cursor_pos, y_pixel)
-        except:
-            self.left_text.see(f"{line_num}.0")
-            self.right_text.see(f"{line_num}.0")
-
-    def adjust_scroll_to_position(self, text_widget, target_index, target_y):
-        """Корректирует прокрутку, чтобы указанная позиция была на заданной высоте"""
-        try:
-            bbox = text_widget.bbox(target_index)
-            if bbox is None:
-                return
-            current_y = bbox[1]
-            diff = target_y - current_y
-            if abs(diff) > 5:
-                line_height = bbox[3] if bbox[3] > 0 else 16
-                scroll_lines = diff / line_height
-                text_widget.yview_scroll(int(-scroll_lines), "units")
-        except:
-            pass
-
-    def export_parallel_book(self, book_type):
-        if not self.orig_path or not self.trans_path:
-            DialogManager.show_dialog("Ошибка", "Файлы не загружены")
-            return
-
-        original_lines = self.left_text.get("1.0", tk.END).strip().splitlines()
-        translated_lines = self.right_text.get("1.0", tk.END).strip().splitlines()
-
-        max_len = max(len(original_lines), len(translated_lines))
-        original_lines += [""] * (max_len - len(original_lines))
-        translated_lines += [""] * (max_len - len(translated_lines))
-
-        BookExporter(self.orig_path, book_type, original_lines, translated_lines)
-
-    def save_md_files(self):
-        try:
-            # 🔹 ЕСЛИ ФАЙЛЫ ЕЩЁ НЕ СОХРАНЯЛИСЬ
-            if not self.orig_path or not self.trans_path:
-                path = filedialog.asksaveasfilename(
-                    title="Сохранить Markdown файлы",
-                    defaultextension=".md",
-                    filetypes=[("Markdown files", "*.md")],
-                )
-
-                if not path:
-                    return  # пользователь отменил
-
-                base, ext = os.path.splitext(path)
-
-                # определяем язык
-                if base.endswith(".en"):
-                    base = base[:-3]
-                    self.orig_path = base + ".en.md"
-                    self.trans_path = base + ".ru.md"
-                elif base.endswith(".ru"):
-                    base = base[:-3]
-                    self.orig_path = base + ".ru.md"
-                    self.trans_path = base + ".en.md"
-                else:
-                    # если пользователь не указал язык — считаем .en основным
-                    self.orig_path = base + ".en.md"
-                    self.trans_path = base + ".ru.md"
-
-            # 🔹 ПОЛУЧАЕМ ТЕКСТ
-            original_text = self.left_text.get("1.0", "end-1c").splitlines()
-            translated_text = self.right_text.get("1.0", "end-1c").splitlines()
-
-            # 🔹 ВЫРАВНИВАНИЕ СТРОК
-            # max_len = max(len(original_text), len(translated_text))
-            # original_text += [""] * (max_len - len(original_text))
-            # translated_text += [""] * (max_len - len(translated_text))
-
-            self.update_file_title()
-
-            # 🔹 СОХРАНЕНИЕ
-            with open(self.orig_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(original_text) + "\n")
-
-            with open(self.trans_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(translated_text) + "\n")
-
-            DialogManager.show_dialog("Успех", "Файлы сохранены.")
-
-        except Exception as e:
-            DialogManager.show_dialog("Ошибка сохранения", str(e))
-
-    def highlight_current_line_left(self, event=None):
-        # даём курсору переместиться, затем подсвечиваем
-        self.root.after(
-            1,
-            lambda: self._highlight_line_with_sync(
-                self.left_text, self.right_text, TextFieldType.LEFT
-            ),
-        )
-        # обновляем выделение текущего заголовка
-        index = self.left_text.index("insert")
-        line_num = index.split(".")[0]
-
-        self.left_toc.update_selection_by_text_line(int(line_num))
-
-    def highlight_current_line_right(self, event=None):
-        self.root.after(
-            1,
-            lambda: self._highlight_line_with_sync(
-                self.right_text, self.left_text, TextFieldType.RIGHT
-            ),
-        )
-        # обновляем выделение текущего заголовка
-        index = self.right_text.index("insert")
-        line_num = index.split(".")[0]
-
-        self.right_toc.update_selection_by_text_line(int(line_num))
-
-    def _highlight_line_with_sync(self, src_text, dst_text, field_type):
-        self._highlight_line(src_text)
-        if field_type == TextFieldType.LEFT:
-            self.sync_cursor_left()
+        if os.path.exists(en_path):
+            with open(en_path, "r", encoding="utf-8") as f:
+                self.left_editor.setPlainText(f.read())
         else:
-            self.sync_cursor_right()
-        self._highlight_line(dst_text)
+            self.left_editor.setPlainText("")
 
-    def _highlight_line(self, text_widget):
-        text_widget.tag_remove("current_line", "1.0", "end")
-        index = text_widget.index("insert")
-        line_start = f"{index.split('.')[0]}.0"
-        line_end = f"{index.split('.')[0]}.end"
-        text_widget.tag_add("current_line", line_start, line_end)
+        if os.path.exists(ru_path):
+            with open(ru_path, "r", encoding="utf-8") as f:
+                self.right_editor.setPlainText(f.read())
+        else:
+            self.right_editor.setPlainText("")
+
+        self.left_editor._syncing = False
+        self.right_editor._syncing = False
+
+    def _save_files(self):
+        if not self.current_file_base:
+            self._save_files_as()
+            return
+
+        en_path = self.current_file_base + ".en.md"
+        ru_path = self.current_file_base + ".ru.md"
+
+        with open(en_path, "w", encoding="utf-8") as f:
+            f.write(self.left_editor.toPlainText())
+        with open(ru_path, "w", encoding="utf-8") as f:
+            f.write(self.right_editor.toPlainText())
+
+    def _save_files_as(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save as .en.md", "", "Markdown Files (*.en.md)"
+        )
+        if not file_path:
+            return
+        if file_path.endswith(".en.md"):
+            base = file_path[:-6]
+        else:
+            base = file_path
+        self.current_file_base = base
+        self._save_files()
+
+    def _sync_paragraph(self, editor_idx, pos):
+        """Синхронизирует скролл так, чтобы абзацы были на одном уровне окна."""
+        source = self.editors[editor_idx]
+        target = self.editors[1 - editor_idx]
+
+        para_idx = source.get_paragraph_index(pos)
+        if para_idx < 0:
+            return
+
+        target_pos = target.get_paragraph_position(para_idx)
+        if target_pos is None:
+            return
+
+        # Получаем Y-позицию курсора в source (в пикселях viewport)
+        source_cursor = source.textCursor()
+        source_cursor.setPosition(source.get_paragraph_position(para_idx))
+        source_rect = source.cursorRect(source_cursor)
+        source_y = source_rect.top()
+
+        # Устанавливаем курсор в target на начало абзаца
+        target._syncing = True
+        target_cursor = QTextCursor(target.document())
+        target_cursor.setPosition(target_pos)
+        target.setTextCursor(target_cursor)
+
+        # Получаем Y-позицию курсора в target (в пикселях viewport)
+        target_rect = target.cursorRect(target_cursor)
+        target_y = target_rect.top()
+
+        # Вычисляем разницу и прокручиваем
+        diff = source_y - target_y
+        if abs(diff) > 5:
+            line_height = target_rect.height() if target_rect.height() > 0 else 16
+            scroll_pixels = diff
+            scrollbar = target.verticalScrollBar()
+            current_value = scrollbar.value()
+            # Конвертируем пиксели в единицы скролла
+            scroll_units = int(scroll_pixels / line_height)
+            scrollbar.setValue(current_value - scroll_units)
+
+        target._syncing = False
 
 
-def clear_temp_dir():
-    if os.path.exists(TEMP_DIR):
-        for name in os.listdir(TEMP_DIR):
-            path = os.path.join(TEMP_DIR, name)
-            try:
-                if os.path.isfile(path):
-                    os.remove(path)
-            except Exception:
-                pass
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    window = ParallelEditor()
+    window.show()
+
+    # Открытие файла из командной строки
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+        if file_path.endswith(".en.md") or file_path.endswith(".ru.md"):
+            base = file_path[:-6]
+        else:
+            base = file_path
+
+        window.current_file_base = base
+        window._load_files()
+
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = SideBySideEditor(root)
-    root.mainloop()
-    clear_temp_dir()
+    main()
