@@ -298,10 +298,10 @@ class FindReplaceDialog(QDialog):
     def __init__(self, parent: "ParallelEditor"):
         super().__init__(parent)
         self.main = parent
-        self.setWindowTitle("Поиск и замена")
         self.setMinimumWidth(480)
-        self._last_match_end = -1
         self._last_editor = None
+        self._active_editor = None  # панель, с которой открыли диалог
+        self._replace_mode = True
 
         layout = QVBoxLayout(self)
 
@@ -311,15 +311,18 @@ class FindReplaceDialog(QDialog):
         self.find_edit.returnPressed.connect(self.find_next)
         form.addRow("Найти:", self.find_edit)
 
+        self.replace_label = QLabel("Заменить на:")
         self.replace_edit = QLineEdit()
         self.replace_edit.setPlaceholderText("На что заменить…")
         self.replace_edit.returnPressed.connect(self.replace_one)
-        form.addRow("Заменить на:", self.replace_edit)
+        form.addRow(self.replace_label, self.replace_edit)
         layout.addLayout(form)
 
         opts = QHBoxLayout()
         self.case_cb = QCheckBox("Учитывать регистр")
+        self.case_cb.setToolTip("Если включено — Hello и hello считаются разными")
         self.regex_cb = QCheckBox("Регулярное выражение")
+        self.regex_cb.setToolTip("Синтаксис Python re; в замене доступны \\1, \\g<name>")
         opts.addWidget(self.case_cb)
         opts.addWidget(self.regex_cb)
         opts.addStretch()
@@ -337,6 +340,7 @@ class FindReplaceDialog(QDialog):
 
         btns = QHBoxLayout()
         self.btn_next = QPushButton("Найти далее")
+        self.btn_next.setDefault(True)
         self.btn_next.clicked.connect(self.find_next)
         self.btn_prev = QPushButton("Найти ранее")
         self.btn_prev.clicked.connect(self.find_prev)
@@ -360,19 +364,38 @@ class FindReplaceDialog(QDialog):
 
         self.find_edit.setFocus()
 
+    def set_replace_mode(self, enabled: bool) -> None:
+        """True — полный диалог замены; False — только поиск."""
+        self._replace_mode = enabled
+        self.setWindowTitle("Заменить" if enabled else "Найти")
+        self.replace_label.setVisible(enabled)
+        self.replace_edit.setVisible(enabled)
+        self.btn_repl.setVisible(enabled)
+        self.btn_all.setVisible(enabled)
+        # подогнать размер окна под видимые виджеты
+        self.adjustSize()
+
     def _pattern(self):
         raw = self.find_edit.text()
         if not raw:
+            self.status.setText("Введите строку поиска")
+            self.status.setStyleSheet("color: #c5221f;")
             return None
-        flags = 0 if self.case_cb.isChecked() else re.IGNORECASE
-        if self.regex_cb.isChecked():
-            try:
+
+        # Учитывать регистр: флажок ВКЛ → case-sensitive (flags=0)
+        # флажок ВЫКЛ → игнорировать регистр (re.IGNORECASE)
+        flags = 0
+        if not self.case_cb.isChecked():
+            flags |= re.IGNORECASE
+
+        try:
+            if self.regex_cb.isChecked():
                 return re.compile(raw, flags)
-            except re.error as e:
-                self.status.setText(f"Ошибка regex: {e}")
-                self.status.setStyleSheet("color: #c5221f;")
-                return None
-        return re.compile(re.escape(raw), flags)
+            return re.compile(re.escape(raw), flags)
+        except re.error as e:
+            self.status.setText(f"Ошибка regex: {e}")
+            self.status.setStyleSheet("color: #c5221f;")
+            return None
 
     def _editors(self):
         mode = self.scope.currentData()
@@ -382,13 +405,15 @@ class FindReplaceDialog(QDialog):
             return [self.main.right_editor]
         if mode == "both":
             return [self.main.left_editor, self.main.right_editor]
-        # focus
+        # focus: панель, с которой открыли диалог (диалог сам в фокусе)
+        if self._active_editor is not None:
+            return [self._active_editor]
         w = self.main.focusWidget()
         if w is self.main.right_editor:
             return [self.main.right_editor]
         return [self.main.left_editor]
 
-    def _select_match(self, editor: CodeEditor, start: int, end: int) -> None:
+    def _select_match(self, editor: "CodeEditor", start: int, end: int) -> None:
         cursor = editor.textCursor()
         cursor.setPosition(start)
         cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
@@ -405,45 +430,43 @@ class FindReplaceDialog(QDialog):
     def _find(self, forward: bool = True) -> None:
         pat = self._pattern()
         if pat is None:
-            if self.find_edit.text():
-                return
-            self.status.setText("Введите строку поиска")
             return
 
         editors = self._editors()
-        # старт: после текущего совпадения / с курсора
         for editor in editors:
             text = editor.toPlainText()
             cursor = editor.textCursor()
             if forward:
-                start_at = cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
-                # если этот редактор не тот, с которого искали — с начала
+                start_at = (
+                    cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
+                )
                 if self._last_editor is not editor and len(editors) > 1:
                     start_at = 0
                 m = pat.search(text, start_at)
                 if m is None and start_at > 0:
-                    m = pat.search(text, 0)  # wrap
+                    m = pat.search(text, 0)
             else:
-                start_at = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
-                # поиск назад: все совпадения до позиции
+                start_at = (
+                    cursor.selectionStart()
+                    if cursor.hasSelection()
+                    else cursor.position()
+                )
                 matches = list(pat.finditer(text))
                 m = None
                 for cand in reversed(matches):
-                    if cand.end() <= start_at and cand.start() < start_at:
+                    if cand.start() < start_at:
                         m = cand
                         break
                 if m is None and matches:
-                    # wrap: последнее
-                    if matches[-1].start() < start_at or start_at == 0:
-                        m = matches[-1]
-                    elif matches:
-                        m = matches[-1]
+                    m = matches[-1]  # wrap
 
             if m is not None:
                 self._select_match(editor, m.start(), m.end())
                 self._last_editor = editor
-                self._last_match_end = m.end()
-                self.status.setText(f"Найдено: [{m.start()}–{m.end()}]")
+                case_info = "с учётом регистра" if self.case_cb.isChecked() else "без учёта регистра"
+                self.status.setText(
+                    f"Найдено «{m.group()}» [{m.start()}–{m.end()}] ({case_info})"
+                )
                 self.status.setStyleSheet("color: #188038;")
                 return
 
@@ -451,36 +474,40 @@ class FindReplaceDialog(QDialog):
         self.status.setStyleSheet("color: #c5221f;")
 
     def replace_one(self) -> None:
+        if not self._replace_mode:
+            self.find_next()
+            return
         pat = self._pattern()
         if pat is None:
             return
-        editors = self._editors()
-        for editor in editors:
+        repl = self.replace_edit.text()
+        for editor in self._editors():
             cursor = editor.textCursor()
-            if cursor.hasSelection():
-                selected = cursor.selectedText().replace("\u2029", "\n")
-                m = pat.fullmatch(selected)
-                if m is not None:
-                    repl = self.replace_edit.text()
-                    if self.regex_cb.isChecked():
-                        try:
-                            new = m.expand(repl) if repl else ""
-                            # fullmatch expand: use sub on selected
-                            new = pat.sub(repl, selected, count=1)
-                        except re.error as e:
-                            self.status.setText(f"Ошибка замены: {e}")
-                            return
-                    else:
-                        new = repl
-                    cursor.insertText(new)
-                    self.status.setText("Заменено 1")
-                    self.status.setStyleSheet("color: #188038;")
-                    self.find_next()
-                    return
-        # нет выделенного совпадения — найти
+            if not cursor.hasSelection():
+                continue
+            selected = cursor.selectedText().replace(chr(0x2029), chr(10))
+            m = pat.fullmatch(selected)
+            if m is None:
+                continue
+            try:
+                if self.regex_cb.isChecked():
+                    new = pat.sub(repl, selected, count=1)
+                else:
+                    new = repl
+            except re.error as e:
+                self.status.setText(f"Ошибка замены: {e}")
+                self.status.setStyleSheet("color: #c5221f;")
+                return
+            cursor.insertText(new)
+            self.status.setText("Заменено 1")
+            self.status.setStyleSheet("color: #188038;")
+            self.find_next()
+            return
         self.find_next()
 
     def replace_all(self) -> None:
+        if not self._replace_mode:
+            return
         pat = self._pattern()
         if pat is None:
             return
@@ -489,16 +516,12 @@ class FindReplaceDialog(QDialog):
         for editor in self._editors():
             text = editor.toPlainText()
             try:
-                if self.regex_cb.isChecked():
-                    new_text, n = pat.subn(repl, text)
-                else:
-                    new_text, n = pat.subn(repl, text)
+                new_text, n = pat.subn(repl, text)
             except re.error as e:
                 self.status.setText(f"Ошибка замены: {e}")
                 self.status.setStyleSheet("color: #c5221f;")
                 return
             if n:
-                # сохранить позицию курсора
                 pos = editor.textCursor().position()
                 editor._syncing = True
                 editor.setPlainText(new_text)
@@ -608,20 +631,28 @@ class ParallelEditor(QMainWindow):
         if not hasattr(self, "_find_dlg") or self._find_dlg is None:
             self._find_dlg = FindReplaceDialog(self)
         dlg = self._find_dlg
-        # если в выделении есть текст — подставить в поиск
+
+        # запомнить активную панель до открытия диалога
         w = self.focusWidget()
+        if w is self.right_editor:
+            dlg._active_editor = self.right_editor
+        elif w is self.left_editor:
+            dlg._active_editor = self.left_editor
+        elif dlg._active_editor is None:
+            dlg._active_editor = self.left_editor
+
         if isinstance(w, CodeEditor) and w.textCursor().hasSelection():
-            sel = w.textCursor().selectedText().replace("\u2029", "\n")
-            if sel and "\n" not in sel:
+            sel = w.textCursor().selectedText().replace(chr(0x2029), chr(10))
+            if sel and chr(10) not in sel:
                 dlg.find_edit.setText(sel)
-        dlg.replace_edit.setEnabled(True)
-        dlg.btn_repl.setEnabled(True)
-        dlg.btn_all.setEnabled(True)
+
+        dlg.set_replace_mode(replace_mode)
         dlg.find_edit.setFocus()
         dlg.find_edit.selectAll()
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
 
     def _sync_paragraph(self, editor_idx: int, pos: int) -> None:
 
