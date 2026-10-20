@@ -248,6 +248,47 @@ class CodeEditor(QPlainTextEdit):
     def clear_line_highlight(self) -> None:
         self.setExtraSelections([])
 
+    def highlight_search_matches(
+        self,
+        ranges: list,
+        current: tuple | None = None,
+    ) -> None:
+        """Подсветка всех вхождений поиска.
+
+        ranges — список (start, end);
+        current — текущее совпадение (другой цвет).
+        """
+        all_fmt = QTextCharFormat()
+        all_fmt.setBackground(QColor("#fff59d"))  # светло-жёлтый — все совпадения
+
+        cur_fmt = QTextCharFormat()
+        cur_fmt.setBackground(QColor("#ff9800"))  # оранжевый — текущее
+        cur_fmt.setForeground(QColor("#000000"))
+
+        extras = []
+        cur_set = set()
+        if current is not None:
+            cur_set.add((current[0], current[1]))
+
+        for start, end in ranges:
+            if start >= end:
+                continue
+            sel = QTextEdit.ExtraSelection()
+            if (start, end) in cur_set:
+                sel.format = cur_fmt
+            else:
+                sel.format = all_fmt
+            cursor = self.textCursor()
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            sel.cursor = cursor
+            extras.append(sel)
+
+        self.setExtraSelections(extras)
+
+    def clear_search_highlight(self) -> None:
+        self.setExtraSelections([])
+
     def get_paragraph_index(self, pos: int) -> int:
         block = self.document().findBlock(pos)
         if not block.isValid():
@@ -421,6 +462,28 @@ class FindReplaceDialog(QDialog):
         editor.centerCursor()
         editor.setFocus()
 
+    def _highlight_all_in_editors(self, pat, current_editor=None, current_span=None) -> None:
+        """Подсветить все совпадения во всех целевых редакторах."""
+        if pat is None:
+            return
+        for editor in self._editors():
+            text = editor.toPlainText()
+            ranges = [(m.start(), m.end()) for m in pat.finditer(text)]
+            cur = current_span if editor is current_editor else None
+            editor.highlight_search_matches(ranges, current=cur)
+
+    def _clear_all_search_highlights(self) -> None:
+        for ed in (self.main.left_editor, self.main.right_editor):
+            ed.clear_search_highlight()
+
+    def reject(self) -> None:
+        self._clear_all_search_highlights()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._clear_all_search_highlights()
+        super().closeEvent(event)
+
     def find_next(self) -> None:
         self._find(forward=True)
 
@@ -463,13 +526,25 @@ class FindReplaceDialog(QDialog):
             if m is not None:
                 self._select_match(editor, m.start(), m.end())
                 self._last_editor = editor
-                case_info = "с учётом регистра" if self.case_cb.isChecked() else "без учёта регистра"
+                self._highlight_all_in_editors(
+                    pat, current_editor=editor, current_span=(m.start(), m.end())
+                )
+                total = sum(
+                    len(list(pat.finditer(ed.toPlainText()))) for ed in self._editors()
+                )
+                case_info = (
+                    "с учётом регистра"
+                    if self.case_cb.isChecked()
+                    else "без учёта регистра"
+                )
                 self.status.setText(
-                    f"Найдено «{m.group()}» [{m.start()}–{m.end()}] ({case_info})"
+                    f"Найдено «{m.group()}» — совпадение, всего: {total} ({case_info})"
                 )
                 self.status.setStyleSheet("color: #188038;")
                 return
 
+        # ничего не найдено — всё равно обновить подсветку (пусто)
+        self._highlight_all_in_editors(pat)
         self.status.setText("Ничего не найдено")
         self.status.setStyleSheet("color: #c5221f;")
 
@@ -533,6 +608,10 @@ class FindReplaceDialog(QDialog):
         if total:
             self.status.setText(f"Заменено: {total}")
             self.status.setStyleSheet("color: #188038;")
+            # обновить подсветку оставшихся вхождений
+            pat2 = self._pattern()
+            if pat2 is not None:
+                self._highlight_all_in_editors(pat2)
         else:
             self.status.setText("Нечего заменять")
             self.status.setStyleSheet("color: #c5221f;")
