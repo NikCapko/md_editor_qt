@@ -5,7 +5,7 @@ Parallel Markdown Editor
 Файлы: .en.md (оригинал, слева) и .ru.md (перевод, справа)
 
 Синхронизация прокрутки — рабочий алгоритм:
-  клик → выделить абзац → найти пару ¶N → выровнять по Y через scrollbar.
+  клик по строке → выделить только её → выровнять парный абзац на другой стороне.
 """
 
 from __future__ import annotations
@@ -36,14 +36,13 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QStatusBar,
     QTextEdit,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
 
 class NumberBar(QWidget):
-    """Панель номеров строк (+ ¶N на первой строке абзаца)."""
+    """Панель номеров строк."""
 
     def __init__(self, editor: "CodeEditor"):
         super().__init__(editor)
@@ -54,6 +53,7 @@ class NumberBar(QWidget):
         painter = QPainter(self)
         painter.fillRect(event.rect(), QColor("#f0f0f0"))
         painter.setFont(self.editor.font())
+        painter.setPen(QColor("#888"))
 
         block = self.editor.firstVisibleBlock()
         offset = self.editor.contentOffset()
@@ -61,30 +61,14 @@ class NumberBar(QWidget):
         top = int(block_rect.top())
         line_height = self.editor.fontMetrics().height()
         block_number = block.blockNumber() + 1
-        para_starts = self.editor.paragraph_start_lines()
 
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and top + line_height >= event.rect().top():
-                painter.setPen(QColor("#888"))
                 painter.drawText(
                     0, top, self.width() - 4, line_height,
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     str(block_number),
                 )
-                bn0 = block_number - 1
-                if bn0 in para_starts:
-                    painter.setPen(QColor("#1a73e8"))
-                    f = painter.font()
-                    f.setBold(True)
-                    f.setPointSize(max(8, f.pointSize() - 1))
-                    painter.setFont(f)
-                    painter.drawText(
-                        2, top, self.width() // 2, line_height,
-                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                        f"¶{para_starts[bn0]}",
-                    )
-                    painter.setFont(self.editor.font())
-
             block = block.next()
             if block.isValid():
                 block_rect = self.editor.blockBoundingGeometry(block).translated(offset)
@@ -204,7 +188,7 @@ class CodeEditor(QPlainTextEdit):
 
     def _update_number_bar_width(self, _=None):
         digits = len(str(max(1, self.blockCount())))
-        width = self.fontMetrics().horizontalAdvance("9") * (digits + 3) + 12
+        width = self.fontMetrics().horizontalAdvance("9") * (digits + 1) + 10
         self.number_bar.setFixedWidth(width)
         self.setViewportMargins(width, 0, 0, 0)
         cr = self.contentsRect()
@@ -218,21 +202,6 @@ class CodeEditor(QPlainTextEdit):
         if rect.contains(self.viewport().rect()):
             self._update_number_bar_width()
 
-    def paragraph_start_lines(self) -> dict:
-        result = {}
-        b = self.document().begin()
-        in_para = False
-        idx = 0
-        while b.isValid():
-            if b.text().strip():
-                if not in_para:
-                    in_para = True
-                    idx += 1
-                    result[b.blockNumber()] = idx
-            else:
-                in_para = False
-            b = b.next()
-        return result
 
     def _on_cursor_changed(self):
         cursor = self.textCursor()
@@ -249,61 +218,25 @@ class CodeEditor(QPlainTextEdit):
         if self._mouse_click:
             self._mouse_click = False
             if not self._syncing:
-                self._select_paragraph()
+                # только подсветка (highlighter + ExtraSelection), без текстового selection
                 pos = self.textCursor().position()
                 self.paragraph_clicked.emit(self.editor_idx, pos)
 
-    def _select_paragraph(self):
-        cursor = self.textCursor()
-        pos = cursor.position()
-        block = self.document().findBlock(pos)
-        if not block.isValid():
-            return
-
-        start_block = block
-        while start_block.previous().isValid() and start_block.previous().text().strip():
-            start_block = start_block.previous()
-
-        end_block = block
-        while end_block.next().isValid() and end_block.next().text().strip():
-            end_block = end_block.next()
-
-        cursor.setPosition(start_block.position())
-        cursor.setPosition(
-            end_block.position() + len(end_block.text()),
-            QTextCursor.MoveMode.KeepAnchor,
-        )
-        self.setTextCursor(cursor)
-
-    def highlight_paragraph_at(self, pos: int, color: QColor) -> None:
+    def highlight_line_at(self, pos: int, color: QColor) -> None:
+        """Подсветка только одной строки по позиции."""
         block = self.document().findBlock(pos)
         if not block.isValid():
             self.setExtraSelections([])
             return
+        sel = QTextEdit.ExtraSelection()
+        sel.format.setBackground(color)
+        sel.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        c = QTextCursor(block)
+        c.clearSelection()
+        sel.cursor = c
+        self.setExtraSelections([sel])
 
-        start_block = block
-        while start_block.previous().isValid() and start_block.previous().text().strip():
-            start_block = start_block.previous()
-        end_block = block
-        while end_block.next().isValid() and end_block.next().text().strip():
-            end_block = end_block.next()
-
-        extras = []
-        b = start_block
-        while b.isValid():
-            sel = QTextEdit.ExtraSelection()
-            sel.format.setBackground(color)
-            sel.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-            c = QTextCursor(b)
-            c.clearSelection()
-            sel.cursor = c
-            extras.append(sel)
-            if b == end_block:
-                break
-            b = b.next()
-        self.setExtraSelections(extras)
-
-    def clear_paragraph_highlight(self) -> None:
+    def clear_line_highlight(self) -> None:
         self.setExtraSelections([])
 
     def get_paragraph_index(self, pos: int) -> int:
@@ -392,7 +325,6 @@ class ParallelEditor(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self._create_menu()
-        self._create_toolbar()
         self.statusBar().showMessage(
             "Клик по абзацу — выделить и выровнять парный абзац"
         )
@@ -422,17 +354,6 @@ class ParallelEditor(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-    def _create_toolbar(self):
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        self.addToolBar(tb)
-        open_btn = QAction("Открыть", self)
-        open_btn.triggered.connect(self._open_files)
-        tb.addAction(open_btn)
-        save_btn = QAction("Сохранить", self)
-        save_btn.triggered.connect(self._save_files)
-        tb.addAction(save_btn)
-
     def _sync_paragraph(self, editor_idx: int, pos: int) -> None:
         """Рабочий алгоритм выравнивания абзацев по Y."""
         source = self.editors[editor_idx]
@@ -445,9 +366,9 @@ class ParallelEditor(QMainWindow):
         target_pos = target.get_paragraph_position(para_idx)
         if target_pos is None:
             self.statusBar().showMessage(
-                f"¶{para_idx + 1}: нет пары на другой стороне", 3000
+                f"Абзац {para_idx + 1}: нет пары на другой стороне", 3000
             )
-            target.clear_paragraph_highlight()
+            target.clear_line_highlight()
             return
 
         # Y начала абзаца в source
@@ -461,12 +382,12 @@ class ParallelEditor(QMainWindow):
         # Курсор в target на начало парного абзаца
         target._syncing = True
         target_cursor = QTextCursor(target.document())
-        target_cursor.setPosition(target_pos)
+        target_cursor.setPosition(target_pos)  # без KeepAnchor — курсор, не выделение
         target.setTextCursor(target_cursor)
 
-        # Подсветка обоих абзацев
-        source.highlight_paragraph_at(pos, QColor(200, 230, 255))
-        target.highlight_paragraph_at(target_pos, QColor(200, 245, 200))
+        # Только фон строки, без selection текста
+        source.highlight_line_at(pos, QColor(200, 230, 255))
+        target.highlight_line_at(target_pos, QColor(200, 245, 200))
 
         target_rect = target.cursorRect(target_cursor)
         target_y = target_rect.top()
@@ -480,7 +401,7 @@ class ParallelEditor(QMainWindow):
             scrollbar.setValue(scrollbar.value() - scroll_units)
 
         target._syncing = False
-        self.statusBar().showMessage(f"¶{para_idx + 1} выровнен", 2500)
+        self.statusBar().showMessage(f"Абзац {para_idx + 1} выровнен", 2500)
 
     def _on_text_changed(self, side: str) -> None:
         if side == "en":
