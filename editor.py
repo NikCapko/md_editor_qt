@@ -14,6 +14,8 @@ import re
 import sys
 from pathlib import Path
 
+from export_parallel import export_file
+
 from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtGui import (
     QAction,
@@ -27,6 +29,8 @@ from PySide6.QtGui import (
     QTextFormat,
 )
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QRadioButton,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -684,6 +688,16 @@ class ParallelEditor(QMainWindow):
         file_menu.addAction(save_as_action)
 
         file_menu.addSeparator()
+
+        export_pdf_action = QAction("Экспорт в PDF…", self)
+        export_pdf_action.triggered.connect(lambda: self._export("pdf"))
+        file_menu.addAction(export_pdf_action)
+
+        export_epub_action = QAction("Экспорт в EPUB…", self)
+        export_epub_action.triggered.connect(lambda: self._export("epub"))
+        file_menu.addAction(export_epub_action)
+
+        file_menu.addSeparator()
         quit_action = QAction("Выход", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
@@ -733,9 +747,73 @@ class ParallelEditor(QMainWindow):
         dlg.activateWindow()
 
 
-    def _sync_paragraph(self, editor_idx: int, pos: int) -> None:
+    def _export(self, fmt: str) -> None:
+        """Экспорт в PDF или EPUB: таблица или построчно."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Экспорт в {fmt.upper()}")
+        layout = QVBoxLayout(dlg)
 
-        """Рабочий алгоритм выравнивания абзацев по Y."""
+        layout.addWidget(QLabel("Формат вёрстки:"))
+        radio_table = QRadioButton("Таблица: две колонки (оригинал | перевод)")
+        radio_line = QRadioButton("Построчно: оригинал, затем перевод (блоками)")
+        radio_table.setChecked(True)
+        layout.addWidget(radio_table)
+        layout.addWidget(radio_line)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        layout_mode = "table" if radio_table.isChecked() else "interlinear"
+
+        if fmt == "pdf":
+            filt = "PDF (*.pdf)"
+            default_ext = ".pdf"
+        else:
+            filt = "EPUB (*.epub)"
+            default_ext = ".epub"
+
+        default_name = "parallel"
+        if self.current_file_base:
+            default_name = Path(self.current_file_base).name
+        elif self._en_path:
+            default_name = self._en_path.stem.replace(".en", "")
+
+        suffix = "_table" if layout_mode == "table" else "_lines"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Сохранить {fmt.upper()}",
+            f"{default_name}{suffix}{default_ext}",
+            filt,
+        )
+        if not path:
+            return
+        if not path.lower().endswith(default_ext):
+            path += default_ext
+
+        en_text = self.left_editor.toPlainText()
+        ru_text = self.right_editor.toPlainText()
+        title = default_name
+
+        try:
+            export_file(path, en_text, ru_text, layout=layout_mode, title=title)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка экспорта", str(e))
+            return
+
+        self.statusBar().showMessage(f"Экспортировано: {path}", 5000)
+
+    def _sync_paragraph(self, editor_idx: int, pos: int, do_scroll: bool = True) -> None:
+        """Подсветка конкретной строки и её пары; опционально выравнивание по Y.
+
+        Пара = та же строка по номеру (1↔1) на другой стороне.
+        """
         source = self.editors[editor_idx]
         target = self.editors[1 - editor_idx]
 
