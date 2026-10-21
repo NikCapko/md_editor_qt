@@ -45,6 +45,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QSizePolicy,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -166,6 +169,93 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 i = j
             else:
                 i += 1
+
+
+
+class HeadingOutline(QListWidget):
+    """Боковой список markdown-заголовков (# … ######) для навигации."""
+
+    heading_activated = Signal(int)  # position в документе
+
+    _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+
+    def __init__(self, side: str = "left", parent=None):
+        super().__init__(parent)
+        self._side = side  # left | right — только для стиля
+        self._headings: list[tuple[int, int, str]] = []  # (pos, level, title)
+        self._updating = False
+        self.setMinimumWidth(140)
+        self.setMaximumWidth(260)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        accent = "#1a73e8" if side == "left" else "#188038"
+        self.setStyleSheet(
+            f"""
+            QListWidget {{
+                background: #fafafa;
+                border: 1px solid #e0e0e0;
+                font-size: 12px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 3px 6px;
+                color: #333;
+            }}
+            QListWidget::item:selected {{
+                background: {accent};
+                color: white;
+            }}
+            """
+        )
+        self.itemClicked.connect(self._on_item_clicked)
+
+    def rebuild(self, text: str) -> None:
+        """Пересобрать список заголовков из текста документа."""
+        self._updating = True
+        self.clear()
+        self._headings = []
+        for m in self._HEADING_RE.finditer(text):
+            level = len(m.group(1))
+            title = m.group(2).strip()
+            # убрать простой markdown из заголовка
+            title = re.sub(r"\*\*(.+?)\*\*", r"\1", title)
+            title = re.sub(r"`([^`]+)`", r"\1", title)
+            pos = m.start()
+            self._headings.append((pos, level, title))
+            indent = "  " * (level - 1)
+            item = QListWidgetItem(f"{indent}{'#' * level} {title}")
+            item.setData(Qt.ItemDataRole.UserRole, pos)
+            item.setToolTip(title)
+            self.addItem(item)
+        self._updating = False
+
+    def highlight_for_position(self, pos: int) -> None:
+        """Подсветить заголовок, в чьей зоне находится курсор (последний с pos_h <= pos)."""
+        if not self._headings:
+            self.clearSelection()
+            return
+        active = -1
+        for i, (hpos, _level, _title) in enumerate(self._headings):
+            if hpos <= pos:
+                active = i
+            else:
+                break
+        self._updating = True
+        if active < 0:
+            self.clearSelection()
+        else:
+            self.setCurrentRow(active)
+            item = self.item(active)
+            if item is not None:
+                self.scrollToItem(item)
+        self._updating = False
+
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        if self._updating:
+            return
+        pos = item.data(Qt.ItemDataRole.UserRole)
+        if pos is not None:
+            self.heading_activated.emit(int(pos))
 
 
 class CodeEditor(QPlainTextEdit):
@@ -716,10 +806,16 @@ class ParallelEditor(QMainWindow):
 
         editors_row = QHBoxLayout()
         editors_row.setSpacing(2)
+
+        self.left_outline = HeadingOutline("left")
         self.left_editor = CodeEditor(0)
         self.right_editor = CodeEditor(1)
-        editors_row.addWidget(self.left_editor)
-        editors_row.addWidget(self.right_editor)
+        self.right_outline = HeadingOutline("right")
+
+        editors_row.addWidget(self.left_outline, 0)
+        editors_row.addWidget(self.left_editor, 1)
+        editors_row.addWidget(self.right_editor, 1)
+        editors_row.addWidget(self.right_outline, 0)
         root.addLayout(editors_row, 1)
 
         self.editors = [self.left_editor, self.right_editor]
@@ -727,6 +823,18 @@ class ParallelEditor(QMainWindow):
         self.right_editor.paragraph_clicked.connect(self._sync_paragraph)
         self.left_editor.textChanged.connect(lambda: self._on_text_changed("en"))
         self.right_editor.textChanged.connect(lambda: self._on_text_changed("ru"))
+        self.left_editor.cursorPositionChanged.connect(
+            lambda: self._update_active_heading(self.left_editor, self.left_outline)
+        )
+        self.right_editor.cursorPositionChanged.connect(
+            lambda: self._update_active_heading(self.right_editor, self.right_outline)
+        )
+        self.left_outline.heading_activated.connect(
+            lambda pos: self._goto_heading(self.left_editor, pos)
+        )
+        self.right_outline.heading_activated.connect(
+            lambda pos: self._goto_heading(self.right_editor, pos)
+        )
 
         self.setStatusBar(QStatusBar())
         self._create_menu()
@@ -1030,13 +1138,29 @@ class ParallelEditor(QMainWindow):
             self._en_modified = True
             name = self._en_path.name if self._en_path else "Оригинал (.en.md)"
             self.lbl_en.setText(f"Оригинал — {name} *")
+            self.left_outline.rebuild(self.left_editor.toPlainText())
+            self._update_active_heading(self.left_editor, self.left_outline)
         else:
             if self.right_editor._syncing:
                 return
             self._ru_modified = True
             name = self._ru_path.name if self._ru_path else "Перевод (.ru.md)"
             self.lbl_ru.setText(f"Перевод — {name} *")
+            self.right_outline.rebuild(self.right_editor.toPlainText())
+            self._update_active_heading(self.right_editor, self.right_outline)
         self._update_title()
+
+    def _update_active_heading(self, editor: CodeEditor, outline: HeadingOutline) -> None:
+        pos = editor.textCursor().position()
+        outline.highlight_for_position(pos)
+
+    def _goto_heading(self, editor: CodeEditor, pos: int) -> None:
+        """Перейти к заголовку по клику в оглавлении."""
+        cursor = editor.textCursor()
+        cursor.setPosition(pos)
+        editor.setTextCursor(cursor)
+        editor.centerCursor()
+        editor.setFocus()
 
     def _open_files(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1099,6 +1223,10 @@ class ParallelEditor(QMainWindow):
 
         self.left_editor._syncing = False
         self.right_editor._syncing = False
+        self.left_outline.rebuild(self.left_editor.toPlainText())
+        self.right_outline.rebuild(self.right_editor.toPlainText())
+        self._update_active_heading(self.left_editor, self.left_outline)
+        self._update_active_heading(self.right_editor, self.right_outline)
         self._update_title()
         self.statusBar().showMessage("Файлы загружены", 2000)
 

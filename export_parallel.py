@@ -66,8 +66,8 @@ def _find_font() -> tuple[str, str]:
     """Возвращает (regular, bold) пути к TTF с кириллицей."""
     candidates = [
         (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+           "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
         ),
         (
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -110,10 +110,10 @@ def export_pdf(
     font_name = "Helvetica"
     font_bold = "Helvetica-Bold"
     if reg:
-        pdfmetrics.registerFont(TTFont("ParaFont", reg))
-        pdfmetrics.registerFont(TTFont("ParaFont-Bold", bold))
-        font_name = "ParaFont"
-        font_bold = "ParaFont-Bold"
+        pdfmetrics.registerFont(TTFont("DejaVu", reg))
+        pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+        font_name = "DejaVu"
+        font_bold = "DejaVu-Bold"
 
     styles = getSampleStyleSheet()
     cell_style = ParagraphStyle(
