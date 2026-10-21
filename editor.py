@@ -18,7 +18,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QUrl, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -540,10 +541,10 @@ class CodeEditor(QPlainTextEdit):
         return {
             "line_no": line_no,
             "is_empty": is_empty,
-            "para_idx": line_no,          # индекс абзаца = номер строки
+            "para_idx": line_no,  # индекс абзаца = номер строки
             "offset": 0,
             "para_start_line": line_no,
-            "para_end_line": line_no + 1, # ровно одна строка
+            "para_end_line": line_no + 1,  # ровно одна строка
             "position": block.position(),
         }
 
@@ -916,6 +917,163 @@ def _parse_filename_title_author(base_name: str) -> tuple[str, str]:
     return name, ""
 
 
+class FlowLayout(QLayout):
+    """Layout, который размещает виджеты в несколько строк с переносом."""
+
+    def __init__(self, parent=None, margin=0, spacing=-1):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        if margin >= 0:
+            self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def spacing(self):
+        if self._spacing >= 0:
+            return self._spacing
+        return (
+            self.parentWidget()
+            and self.parentWidget()
+            .style()
+            .pixelMetric(self.parentWidget().style().PM_LayoutHorizontalSpacing)
+            or 6
+        )
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        effective_rect = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective_rect.x()
+        y = effective_rect.y()
+        line_height = 0
+        spacing = self.spacing()
+
+        for item in self._items:
+            item_size = item.sizeHint()
+
+            next_x = x + item_size.width() + spacing
+            if next_x - spacing > effective_rect.right() and line_height > 0:
+                x = effective_rect.x()
+                y = y + line_height + spacing
+                next_x = x + item_size.width() + spacing
+                line_height = 0
+
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item_size))
+
+            x = next_x
+            line_height = max(line_height, item_size.height())
+
+        return y + line_height - rect.y() + m.bottom()
+
+
+class TagChip(QWidget):
+    """Виджет-тег в виде 'пилюли'. Кликабельный, меняет цвет."""
+
+    clicked = Signal(str, bool)  # tag_name, is_selected
+
+    def __init__(self, text: str, selected: bool = False, parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.selected = selected
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMouseTracking(True)
+        self._hover = False
+        self._update_style()
+
+    def _update_style(self):
+        """Обновить стиль и перерисовать."""
+        self.update()  # вызвать перерисовку
+
+    def paintEvent(self, event):
+        """Отрисовка чипа."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if self.selected:
+            if self._hover:
+                bg = QColor("#1557b0")
+            else:
+                bg = QColor("#1a73e8")
+            fg = QColor("white")
+        else:
+            if self._hover:
+                bg = QColor("#d0d0d0")
+            else:
+                bg = QColor("#e0e0e0")
+            fg = QColor("#333")
+
+        # рисуем скруглённый прямоугольник
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(self.rect(), 12, 12)
+
+        # рисуем текст
+        painter.setPen(fg)
+        painter.setFont(self.font())
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected = not self.selected
+            self._update_style()
+            self.clicked.emit(self.text, self.selected)
+        super().mousePressEvent(event)
+
+    def enterEvent(self, event):
+        self._hover = True
+        self._update_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self._update_style()
+        super().leaveEvent(event)
+
+    def sizeHint(self):
+        font_metrics = self.fontMetrics()
+        text_width = font_metrics.horizontalAdvance(self.text)
+        return QSize(text_width + 24, 28)
+
+
 class MetadataDialog(QDialog):
     """Редактор метаданных книги (.bnf).
 
@@ -933,8 +1091,8 @@ class MetadataDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Метаданные книги (.bnf)")
-        self.setMinimumWidth(640)
-        self.setMinimumHeight(520)
+        self.setMinimumWidth(1100)
+        self.setMinimumHeight(800)
 
         data = {**DEFAULT_BNF, **(data or {})}
         tags_raw = data.get("tags") or []
@@ -988,28 +1146,25 @@ class MetadataDialog(QDialog):
         tags_box = QGroupBox("Теги")
         tags_layout = QVBoxLayout(tags_box)
 
+        self.tags_container = QWidget()
+        self.tags_flow = FlowLayout(self.tags_container, margin=4, spacing=4)
+        self.tags_container.setLayout(self.tags_flow)
+        self.tags_container.setMinimumHeight(80)
+        self.tags_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        tags_layout.addWidget(self.tags_container)
+
+        self._tag_chips: dict[str, TagChip] = {}
+
         history = _load_tag_history()
         all_known = sorted(
             set(history) | set(current_tags),
             key=lambda s: s.casefold(),
         )
 
-        self.tags_list = QListWidget()
-        self.tags_list.setMinimumHeight(140)
         for tag in all_known:
-            item = QListWidgetItem(tag)
-            item.setFlags(
-                item.flags()
-                | Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-            )
-            item.setCheckState(
-                Qt.CheckState.Checked
-                if tag in current_tags
-                else Qt.CheckState.Unchecked
-            )
-            self.tags_list.addItem(item)
-        tags_layout.addWidget(self.tags_list)
+            self._add_tag_chip(tag, tag in current_tags)
 
         add_row = QHBoxLayout()
         self.new_tag_edit = QLineEdit()
@@ -1038,36 +1193,35 @@ class MetadataDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _add_tag_chip(self, tag: str, selected: bool) -> None:
+        """Добавить чип тега в FlowLayout."""
+        if tag in self._tag_chips:
+            # уже есть — просто обновить состояние
+            chip = self._tag_chips[tag]
+            if chip.selected != selected:
+                chip.selected = selected
+                chip._update_style()
+            return
+
+        chip = TagChip(tag, selected)
+        chip.clicked.connect(self._on_tag_clicked)
+        self._tag_chips[tag] = chip
+        self.tags_flow.addWidget(chip)
+
+    def _on_tag_clicked(self, tag: str, selected: bool) -> None:
+        """Обработчик клика по чипу."""
+        pass  # состояние уже обновлено в TagChip
+
     def _add_new_tag(self) -> None:
         text = self.new_tag_edit.text().strip()
         if not text:
             return
-        for i in range(self.tags_list.count()):
-            if self.tags_list.item(i).text().casefold() == text.casefold():
-                self.tags_list.item(i).setCheckState(Qt.CheckState.Checked)
-                self.new_tag_edit.clear()
-                return
-        item = QListWidgetItem(text)
-        item.setFlags(
-            item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
-        )
-        item.setCheckState(Qt.CheckState.Checked)
-        self.tags_list.addItem(item)
+        self._add_tag_chip(text, True)
         self.new_tag_edit.clear()
 
     def result_data(self) -> dict:
-        selected_tags: list[str] = []
-        for i in range(self.tags_list.count()):
-            item = self.tags_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                t = item.text().strip()
-                if t:
-                    selected_tags.append(t)
-        all_tags = [
-            self.tags_list.item(i).text().strip()
-            for i in range(self.tags_list.count())
-            if self.tags_list.item(i).text().strip()
-        ]
+        selected_tags = [tag for tag, chip in self._tag_chips.items() if chip.selected]
+        all_tags = list(self._tag_chips.keys())
         _save_tag_history(all_tags)
 
         return {
@@ -1513,8 +1667,8 @@ class ParallelEditor(QMainWindow):
         target_cursor = QTextCursor(target.document())
         target_cursor.setPosition(target_pos)
         target.setTextCursor(target_cursor)
-        #source.highlight_line_at(pos, QColor(200, 230, 255))
-        #target.highlight_line_at(target_pos, QColor(200, 245, 200))
+        # source.highlight_line_at(pos, QColor(200, 230, 255))
+        # target.highlight_line_at(target_pos, QColor(200, 245, 200))
         target_rect = target.cursorRect(target_cursor)
         target_y = target_rect.top()
         if do_scroll:
