@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-Parallel Markdown Editor
-Редактор для параллельного перевода с синхронизацией по абзацам.
-Файлы: .en.md (оригинал, слева) и .ru.md (перевод, справа)
-
-Синхронизация прокрутки — рабочий алгоритм:
-  клик по строке → выделить только её → выровнять парный абзац на другой стороне.
+Markdown Editor
+Простой редактор Markdown-файлов с подсветкой синтаксиса,
+номерами строк, боковым оглавлением, поиском/заменой и экспортом.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QRect, QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -33,15 +28,12 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -49,6 +41,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -60,8 +53,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from export_parallel import export_file
-from text_corrector import normalize_text
+# Опциональные импорты — если модулей нет, соответствующие функции отключатся.
+try:
+    from export_parallel import export_file  # type: ignore
+
+    _HAS_EXPORT = True
+except Exception:
+    _HAS_EXPORT = False
+
+try:
+    from text_corrector import normalize_text  # type: ignore
+
+    _HAS_CORRECTOR = True
+except Exception:
+    _HAS_CORRECTOR = False
 
 
 class NumberBar(QWidget):
@@ -158,7 +163,6 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         for pattern, fmt_name in self.rules:
             for match in pattern.finditer(text):
                 if fmt_name == "heading":
-                    # уровень по числу # в начале строки
                     level = 0
                     for ch in text:
                         if ch == "#":
@@ -184,7 +188,6 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 for i in range(max(0, start), min(n, end)):
                     formats[i] = fmt
 
-        # фон активной строки
         if is_active:
             for i in range(n):
                 if formats[i] is None:
@@ -194,7 +197,6 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     combined.setBackground(self.active_fmt.background())
                     formats[i] = combined
 
-        # применить подряд идущие одинаковые форматы
         i = 0
         while i < n:
             if formats[i] is not None:
@@ -208,47 +210,44 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
 
 class HeadingOutline(QListWidget):
-    """Боковой список markdown-заголовков (# … ######) для навигации."""
+    """Боковой список markdown-заголовков для навигации."""
 
-    heading_activated = Signal(int)  # position в документе
+    heading_activated = Signal(int)  # позиция в документе
 
     _ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
     _BOLD_HEADING_RE = re.compile(
         r"^(?<!\*)\*\*(?!\*)(?P<bold_text>.+?)(?<!\*)\*\*(?!\*)$", re.MULTILINE
     )
 
-    def __init__(self, side: str = "left", parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._side = side  # left | right — только для стиля
-        self._headings: list[tuple[int, int, str]] = []  # (pos, level, title)
+        self._headings: list[tuple[int, int, str]] = []
         self._updating = False
-        self.setMinimumWidth(200)
-        self.setMaximumWidth(200)
+        self.setMinimumWidth(220)
+        self.setMaximumWidth(260)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        accent = "#1a73e8" if side == "left" else "#188038"
         self.setStyleSheet(
-            f"""
-            QListWidget {{
+            """
+            QListWidget {
                 background: #fafafa;
                 border: 1px solid #e0e0e0;
                 font-size: 12px;
                 outline: none;
-            }}
-            QListWidget::item {{
+            }
+            QListWidget::item {
                 padding: 3px 6px;
                 color: #333;
-            }}
-            QListWidget::item:selected {{
-                background: {accent};
+            }
+            QListWidget::item:selected {
+                background: #1a73e8;
                 color: white;
-            }}
+            }
             """
         )
         self.itemClicked.connect(self._on_item_clicked)
 
     def rebuild(self, text: str) -> None:
-        """Пересобрать список заголовков из текста документа."""
         self._updating = True
         self.clear()
         self._headings = []
@@ -257,11 +256,10 @@ class HeadingOutline(QListWidget):
             for m in self._ATX_HEADING_RE.finditer(text):
                 yield m.start(), len(m.group(1)), m.group(2)
             for m in self._BOLD_HEADING_RE.finditer(text):
-                yield m.start(), 4, m.group(1)  # уровень для ** — на твой вкус
+                yield m.start(), 4, m.group(1)
 
         for pos, level, title in sorted(_iter_headings(text), key=lambda t: t[0]):
             title = title.strip()
-            # убрать простой markdown из заголовка
             title = re.sub(r"\*\*(.+?)\*\*", r"\1", title)
             title = re.sub(r"`([^`]+)`", r"\1", title)
             self._headings.append((pos, level, title))
@@ -273,7 +271,6 @@ class HeadingOutline(QListWidget):
         self._updating = False
 
     def highlight_for_position(self, pos: int) -> None:
-        """Подсветить заголовок, в чьей зоне находится курсор (последний с pos_h <= pos)."""
         if not self._headings:
             self.clearSelection()
             return
@@ -302,16 +299,10 @@ class HeadingOutline(QListWidget):
 
 
 class CodeEditor(QPlainTextEdit):
-    """Редактор с номерами строк; синхронизация только по клику мыши."""
+    """Редактор с номерами строк и подсветкой Markdown."""
 
-    paragraph_clicked = Signal(int, int, bool)  # editor_idx, pos, do_scroll
-
-    def __init__(self, editor_idx: int = 0):
+    def __init__(self):
         super().__init__()
-        self.editor_idx = editor_idx
-        self._syncing = False
-        self._mouse_click = False
-
         self.number_bar = NumberBar(self)
         self.highlighter = MarkdownHighlighter(self)
 
@@ -323,10 +314,6 @@ class CodeEditor(QPlainTextEdit):
         self.blockCountChanged.connect(self._update_number_bar_width)
         self.updateRequest.connect(self._update_number_bar)
         self._update_number_bar_width()
-
-    def mousePressEvent(self, event):
-        self._mouse_click = True
-        super().mousePressEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -363,13 +350,6 @@ class CodeEditor(QPlainTextEdit):
         self.highlighter.rehighlightBlock(current_block)
         self.highlighter.prev_block_number = current_block.blockNumber()
 
-        if not self._syncing:
-            pos = self.textCursor().position()
-            # mouse_click=True → ещё и выровнять скролл; иначе только подсветка пары
-            do_scroll = self._mouse_click
-            self._mouse_click = False
-            self.paragraph_clicked.emit(self.editor_idx, pos, do_scroll)
-
     def keyPressEvent(self, event):
         mods = event.modifiers()
         key = event.key()
@@ -405,7 +385,6 @@ class CodeEditor(QPlainTextEdit):
         super().keyPressEvent(event)
 
     def format_line(self, kind: str) -> None:
-        """Форматирует текущий блок (строку/абзац Qt)."""
         cursor = self.textCursor()
         block = cursor.block()
         if not block.isValid():
@@ -414,11 +393,9 @@ class CodeEditor(QPlainTextEdit):
         text = block.text()
         start = block.position()
 
-        # --- заголовки ---
         if kind.startswith("h") and kind[1:].isdigit():
             level = int(kind[1])
             level = max(1, min(6, level))
-            # убрать старые # в начале
             body = re.sub(r"^#{1,6}\s*", "", text)
             new_text = (
                 f"{'#' * level} {body.lstrip()}" if body.strip() else f"{'#' * level} "
@@ -433,7 +410,6 @@ class CodeEditor(QPlainTextEdit):
             cursor.endEditBlock()
             return
 
-        # --- bold / italic / bold_italic ---
         markers = {
             "bold_italic": "***",
             "bold": "**",
@@ -443,11 +419,9 @@ class CodeEditor(QPlainTextEdit):
             return
         m = markers[kind]
 
-        # снять уже существующую обёртку *, **, *** с краёв
         core = text
         core = re.sub(r"^(\*{1,3})", "", core)
         core = re.sub(r"(\*{1,3})$", "", core)
-        # если повторно нажали тот же стиль — toggle: оставить без маркеров
         stripped = text.strip()
         if (
             stripped.startswith(m)
@@ -467,57 +441,26 @@ class CodeEditor(QPlainTextEdit):
         cursor.insertText(new_text)
         cursor.endEditBlock()
 
-    def highlight_line_at(self, pos: int, color: QColor) -> None:
-        """Подсветка одной конкретной строки (на всю ширину), без текстового selection."""
-        block = self.document().findBlock(pos)
-        if not block.isValid():
+    def highlight_search_matches(self, ranges, current=None, select_all=False):
+        if not select_all:
             self.setExtraSelections([])
             return
-        sel = QTextEdit.ExtraSelection()
-        sel.format.setBackground(color)
-        sel.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-        # курсор на блок, без выделения символов
-        c = QTextCursor(block)
-        c.clearSelection()
-        sel.cursor = c
-        self.setExtraSelections([sel])
-        # перерисовать viewport — иначе FullWidthSelection иногда не виден
-        self.viewport().update()
 
-    def clear_line_highlight(self) -> None:
-        self.setExtraSelections([])
-        self.viewport().update()
-
-    def highlight_search_matches(
-        self,
-        ranges: list,
-        current: tuple | None = None,
-    ) -> None:
-        """Подсветка всех вхождений поиска.
-
-        ranges — список (start, end);
-        current — текущее совпадение (другой цвет).
-        """
         all_fmt = QTextCharFormat()
-        all_fmt.setBackground(QColor("#fff59d"))  # светло-жёлтый — все совпадения
+        all_fmt.setBackground(QColor("#fff59d"))
 
         cur_fmt = QTextCharFormat()
-        cur_fmt.setBackground(QColor("#ff9800"))  # оранжевый — текущее
+        cur_fmt.setBackground(QColor("#ff9800"))
         cur_fmt.setForeground(QColor("#000000"))
 
-        extras = []
-        cur_set = set()
-        if current is not None:
-            cur_set.add((current[0], current[1]))
+        cur_span = (current[0], current[1]) if current is not None else None
 
+        extras = []
         for start, end in ranges:
             if start >= end:
                 continue
             sel = QTextEdit.ExtraSelection()
-            if (start, end) in cur_set:
-                sel.format = cur_fmt
-            else:
-                sel.format = all_fmt
+            sel.format = cur_fmt if cur_span == (start, end) else all_fmt
             cursor = self.textCursor()
             cursor.setPosition(start)
             cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
@@ -529,69 +472,32 @@ class CodeEditor(QPlainTextEdit):
     def clear_search_highlight(self) -> None:
         self.setExtraSelections([])
 
-    def get_line_info(self, pos: int) -> dict | None:
-        """Каждая строка (блок) = отдельный абзац. Пустая строка тоже абзац."""
-        block = self.document().findBlock(pos)
-        if not block.isValid():
-            return None
-
-        line_no = block.blockNumber()
-        is_empty = not block.text().strip()
-
-        return {
-            "line_no": line_no,
-            "is_empty": is_empty,
-            "para_idx": line_no,  # индекс абзаца = номер строки
-            "offset": 0,
-            "para_start_line": line_no,
-            "para_end_line": line_no + 1,  # ровно одна строка
-            "position": block.position(),
-        }
-
-    def get_paragraph_range(self, para_idx: int) -> tuple[int, int] | None:
-        """(start_line, end_line exclusive) — ровно одна строка."""
-        if para_idx < 0 or para_idx >= self.blockCount():
-            return None
-        return (para_idx, para_idx + 1)
-
-    def get_paragraph_position(self, idx: int):
-        """Позиция начала абзаца idx (для совместимости)."""
-        r = self.get_paragraph_range(idx)
-        if r is None:
-            return None
-        block = self.document().findBlockByNumber(r[0])
-        return block.position() if block.isValid() else None
-
-    def get_paragraph_index(self, pos: int) -> int:
-        block = self.document().findBlock(pos)
-        if not block.isValid():
-            return -1
-        return block.blockNumber()
-
 
 class FindReplaceDialog(QDialog):
-    """Поиск и замена: regex, учёт регистра, сторона (лево/право/оба)."""
+    """Поиск и замена: regex, учёт регистра."""
 
-    def __init__(self, parent: "ParallelEditor"):
+    HISTORY_LIMIT = 20
+    _HISTORY_KEY_FIND = "find_replace/history_find"
+    _HISTORY_KEY_REPL = "find_replace/history_replace"
+
+    def __init__(self, parent: "MarkdownEditor"):
         super().__init__(parent)
         self.main = parent
         self.setMinimumWidth(480)
-        self._last_editor = None
-        self._active_editor = None  # панель, с которой открыли диалог
         self._replace_mode = True
 
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
-        self.find_edit = QLineEdit()
-        self.find_edit.setPlaceholderText("Что искать…")
-        self.find_edit.returnPressed.connect(self.find_next)
+        self.find_edit = self._setup_combo("Что искать…")
+        self.find_edit.lineEdit().returnPressed.connect(self.find_next)
+        self.find_edit.lineEdit().setPlaceholderText("Что искать…")
         form.addRow("Найти:", self.find_edit)
 
         self.replace_label = QLabel("Заменить на:")
-        self.replace_edit = QLineEdit()
-        self.replace_edit.setPlaceholderText("На что заменить…")
-        self.replace_edit.returnPressed.connect(self.replace_one)
+        self.replace_edit = self._setup_combo("На что заменить…")
+        self.replace_edit.lineEdit().returnPressed.connect(self.replace_one)
+        self.replace_edit.lineEdit().setPlaceholderText("На что заменить…")
         form.addRow(self.replace_label, self.replace_edit)
         layout.addLayout(form)
 
@@ -602,20 +508,13 @@ class FindReplaceDialog(QDialog):
         self.regex_cb.setToolTip(
             "Синтаксис Python re; в замене доступны \\1, \\g<name>"
         )
+        self.select_all_cb = QCheckBox("Выделить все")
+        self.select_all_cb.setToolTip("Подсвечивать все найденные совпадения")
         opts.addWidget(self.case_cb)
         opts.addWidget(self.regex_cb)
+        opts.addWidget(self.select_all_cb)
         opts.addStretch()
         layout.addLayout(opts)
-
-        side_row = QHBoxLayout()
-        side_row.addWidget(QLabel("Где:"))
-        self.scope = QComboBox()
-        self.scope.addItem("Активная панель", "focus")
-        self.scope.addItem("Оригинал (слева)", "en")
-        self.scope.addItem("Перевод (справа)", "ru")
-        self.scope.addItem("Обе панели", "both")
-        side_row.addWidget(self.scope, 1)
-        layout.addLayout(side_row)
 
         btns = QHBoxLayout()
         self.btn_prev = QPushButton("Найти ранее")
@@ -642,27 +541,104 @@ class FindReplaceDialog(QDialog):
         layout.addWidget(close_box)
 
         self.find_edit.setFocus()
+        self._load_history()
+
+    def _on_select_all_toggled(self, checked: bool) -> None:
+        pat = self._pattern()
+        if pat is None:
+            self.main.editor.clear_search_highlight()
+            return
+        cur_span = self._current_cursor_span()
+        self._highlight_all(pat, current_span=cur_span)
+
+    def _current_cursor_span(self):
+        cur = self.main.editor.textCursor()
+        if cur.hasSelection():
+            return (cur.selectionStart(), cur.selectionEnd())
+        return None
+
+    def _setup_combo(self, placeholder: str) -> QComboBox:
+        cb = QComboBox()
+        cb.setEditable(True)
+        cb.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        cb.setMaxVisibleItems(12)
+        cb.lineEdit().setPlaceholderText(placeholder)
+        cb.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        cb.setMinimumContentsLength(24)
+        cb.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        cb.customContextMenuRequested.connect(
+            lambda pos, c=cb: self._history_context_menu(c, pos)
+        )
+        return cb
+
+    def _history_context_menu(self, combo: QComboBox, pos) -> None:
+        menu = QMenu(self)
+        act_clear = menu.addAction("Очистить историю")
+        act_clear.setEnabled(combo.count() > 0)
+        chosen = menu.exec(combo.mapToGlobal(pos))
+        if chosen is act_clear:
+            combo.clear()
+            self._save_history()
+
+    def _combo_text(self, combo: QComboBox) -> str:
+        return combo.currentText()
+
+    def _remember(self, combo: QComboBox, value: str) -> None:
+        if not value:
+            return
+        for i in range(combo.count() - 1, -1, -1):
+            if combo.itemText(i) == value:
+                combo.removeItem(i)
+        combo.insertItem(0, value)
+        while combo.count() > self.HISTORY_LIMIT:
+            combo.removeItem(combo.count() - 1)
+        combo.setCurrentIndex(0)
+        self._save_history()
+
+    def _load_history(self) -> None:
+        s = QSettings()
+        for combo, key in (
+            (self.find_edit, self._HISTORY_KEY_FIND),
+            (self.replace_edit, self._HISTORY_KEY_REPL),
+        ):
+            items = s.value(key, [], type=list) or []
+            combo.blockSignals(True)
+            combo.clear()
+            for it in items[: self.HISTORY_LIMIT]:
+                combo.addItem(str(it))
+            combo.setCurrentIndex(-1)
+            combo.setEditText("")
+            combo.blockSignals(False)
+
+    def _save_history(self) -> None:
+        s = QSettings()
+        s.setValue(
+            self._HISTORY_KEY_FIND,
+            [self.find_edit.itemText(i) for i in range(self.find_edit.count())],
+        )
+        s.setValue(
+            self._HISTORY_KEY_REPL,
+            [self.replace_edit.itemText(i) for i in range(self.replace_edit.count())],
+        )
 
     def set_replace_mode(self, enabled: bool) -> None:
-        """True — полный диалог замены; False — только поиск."""
         self._replace_mode = enabled
         self.setWindowTitle("Заменить" if enabled else "Найти")
         self.replace_label.setVisible(enabled)
         self.replace_edit.setVisible(enabled)
         self.btn_repl.setVisible(enabled)
         self.btn_all.setVisible(enabled)
-        # подогнать размер окна под видимые виджеты
         self.adjustSize()
 
     def _pattern(self):
-        raw = self.find_edit.text()
+        raw = self._combo_text(self.find_edit)
         if not raw:
             self.status.setText("Введите строку поиска")
             self.status.setStyleSheet("color: #c5221f;")
             return None
 
-        # Учитывать регистр: флажок ВКЛ → case-sensitive (flags=0)
-        # флажок ВЫКЛ → игнорировать регистр (re.IGNORECASE)
         flags = 0
         if not self.case_cb.isChecked():
             flags |= re.IGNORECASE
@@ -676,23 +652,8 @@ class FindReplaceDialog(QDialog):
             self.status.setStyleSheet("color: #c5221f;")
             return None
 
-    def _editors(self):
-        mode = self.scope.currentData()
-        if mode == "en":
-            return [self.main.left_editor]
-        if mode == "ru":
-            return [self.main.right_editor]
-        if mode == "both":
-            return [self.main.left_editor, self.main.right_editor]
-        # focus: панель, с которой открыли диалог (диалог сам в фокусе)
-        if self._active_editor is not None:
-            return [self._active_editor]
-        w = self.main.focusWidget()
-        if w is self.main.right_editor:
-            return [self.main.right_editor]
-        return [self.main.left_editor]
-
-    def _select_match(self, editor: "CodeEditor", start: int, end: int) -> None:
+    def _select_match(self, start: int, end: int) -> None:
+        editor = self.main.editor
         cursor = editor.textCursor()
         cursor.setPosition(start)
         cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
@@ -700,21 +661,19 @@ class FindReplaceDialog(QDialog):
         editor.centerCursor()
         editor.setFocus()
 
-    def _highlight_all_in_editors(
-        self, pat, current_editor=None, current_span=None
-    ) -> None:
-        """Подсветить все совпадения во всех целевых редакторах."""
+    def _highlight_all(self, pat, current_span=None) -> None:
         if pat is None:
             return
-        for editor in self._editors():
-            text = editor.toPlainText()
-            ranges = [(m.start(), m.end()) for m in pat.finditer(text)]
-            cur = current_span if editor is current_editor else None
-            editor.highlight_search_matches(ranges, current=cur)
+        select_all = self.select_all_cb.isChecked()
+        editor = self.main.editor
+        text = editor.toPlainText()
+        ranges = [(m.start(), m.end()) for m in pat.finditer(text)]
+        editor.highlight_search_matches(
+            ranges, current=current_span, select_all=select_all
+        )
 
     def _clear_all_search_highlights(self) -> None:
-        for ed in (self.main.left_editor, self.main.right_editor):
-            ed.clear_search_highlight()
+        self.main.editor.clear_search_highlight()
 
     def reject(self) -> None:
         self._clear_all_search_highlights()
@@ -735,58 +694,45 @@ class FindReplaceDialog(QDialog):
         if pat is None:
             return
 
-        editors = self._editors()
-        for editor in editors:
-            text = editor.toPlainText()
-            cursor = editor.textCursor()
-            if forward:
-                start_at = (
-                    cursor.selectionEnd()
-                    if cursor.hasSelection()
-                    else cursor.position()
-                )
-                if self._last_editor is not editor and len(editors) > 1:
-                    start_at = 0
-                m = pat.search(text, start_at)
-                if m is None and start_at > 0:
-                    m = pat.search(text, 0)
-            else:
-                start_at = (
-                    cursor.selectionStart()
-                    if cursor.hasSelection()
-                    else cursor.position()
-                )
-                matches = list(pat.finditer(text))
-                m = None
-                for cand in reversed(matches):
-                    if cand.start() < start_at:
-                        m = cand
-                        break
-                if m is None and matches:
-                    m = matches[-1]  # wrap
+        editor = self.main.editor
+        text = editor.toPlainText()
+        cursor = editor.textCursor()
 
-            if m is not None:
-                self._select_match(editor, m.start(), m.end())
-                self._last_editor = editor
-                self._highlight_all_in_editors(
-                    pat, current_editor=editor, current_span=(m.start(), m.end())
-                )
-                total = sum(
-                    len(list(pat.finditer(ed.toPlainText()))) for ed in self._editors()
-                )
-                case_info = (
-                    "с учётом регистра"
-                    if self.case_cb.isChecked()
-                    else "без учёта регистра"
-                )
-                self.status.setText(
-                    f"Найдено «{m.group()}» — совпадение, всего: {total} ({case_info})"
-                )
-                self.status.setStyleSheet("color: #188038;")
-                return
+        if forward:
+            start_at = (
+                cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
+            )
+            m = pat.search(text, start_at)
+            if m is None and start_at > 0:
+                m = pat.search(text, 0)
+        else:
+            start_at = (
+                cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+            )
+            matches = list(pat.finditer(text))
+            m = None
+            for cand in reversed(matches):
+                if cand.start() < start_at:
+                    m = cand
+                    break
+            if m is None and matches:
+                m = matches[-1]
 
-        # ничего не найдено — всё равно обновить подсветку (пусто)
-        self._highlight_all_in_editors(pat)
+        if m is not None:
+            self._remember(self.find_edit, self._combo_text(self.find_edit))
+            self._select_match(m.start(), m.end())
+            self._highlight_all(pat, current_span=(m.start(), m.end()))
+            total = len(list(pat.finditer(text)))
+            case_info = (
+                "с учётом регистра"
+                if self.case_cb.isChecked()
+                else "без учёта регистра"
+            )
+            self.status.setText(f"Найдено «{m.group()}» — всего: {total} ({case_info})")
+            self.status.setStyleSheet("color: #188038;")
+            return
+
+        self._highlight_all(pat)
         self.status.setText("Ничего не найдено")
         self.status.setStyleSheet("color: #c5221f;")
 
@@ -798,28 +744,29 @@ class FindReplaceDialog(QDialog):
         if pat is None:
             return
         repl = self.replace_edit.text()
-        for editor in self._editors():
-            cursor = editor.textCursor()
-            if not cursor.hasSelection():
-                continue
-            selected = cursor.selectedText().replace(chr(0x2029), chr(10))
-            m = pat.fullmatch(selected)
-            if m is None:
-                continue
-            try:
-                if self.regex_cb.isChecked():
-                    new = pat.sub(repl, selected, count=1)
-                else:
-                    new = repl
-            except re.error as e:
-                self.status.setText(f"Ошибка замены: {e}")
-                self.status.setStyleSheet("color: #c5221f;")
-                return
-            cursor.insertText(new)
-            self.status.setText("Заменено 1")
-            self.status.setStyleSheet("color: #188038;")
+        editor = self.main.editor
+        cursor = editor.textCursor()
+        if not cursor.hasSelection():
             self.find_next()
             return
+        selected = cursor.selectedText().replace(chr(0x2029), chr(10))
+        m = pat.fullmatch(selected)
+        if m is None:
+            self.find_next()
+            return
+        try:
+            if self.regex_cb.isChecked():
+                new = pat.sub(repl, selected, count=1)
+            else:
+                new = repl
+        except re.error as e:
+            self.status.setText(f"Ошибка замены: {e}")
+            self.status.setStyleSheet("color: #c5221f;")
+            return
+        cursor.insertText(new)
+        self._remember(self.find_edit, self._combo_text(self.find_edit))
+        self.status.setText("Заменено 1")
+        self.status.setStyleSheet("color: #188038;")
         self.find_next()
 
     def replace_all(self) -> None:
@@ -829,501 +776,82 @@ class FindReplaceDialog(QDialog):
         if pat is None:
             return
         repl = self.replace_edit.text()
-        total = 0
-        for editor in self._editors():
-            text = editor.toPlainText()
-            try:
-                new_text, n = pat.subn(repl, text)
-            except re.error as e:
-                self.status.setText(f"Ошибка замены: {e}")
-                self.status.setStyleSheet("color: #c5221f;")
-                return
-            if n:
-                pos = editor.textCursor().position()
-                editor._syncing = True
-                editor.setPlainText(new_text)
-                c = editor.textCursor()
-                c.setPosition(min(pos, len(new_text)))
-                editor.setTextCursor(c)
-                editor._syncing = False
-                total += n
-        if total:
-            self.status.setText(f"Заменено: {total}")
+        editor = self.main.editor
+        text = editor.toPlainText()
+        try:
+            new_text, n = pat.subn(repl, text)
+        except re.error as e:
+            self.status.setText(f"Ошибка замены: {e}")
+            self.status.setStyleSheet("color: #c5221f;")
+            return
+        if n:
+            pos = editor.textCursor().position()
+            editor.setPlainText(new_text)
+            c = editor.textCursor()
+            c.setPosition(min(pos, len(new_text)))
+            editor.setTextCursor(c)
+            self._remember(self.find_edit, self._combo_text(self.find_edit))
+            self.status.setText(f"Заменено: {n}")
             self.status.setStyleSheet("color: #188038;")
-            # обновить подсветку оставшихся вхождений
             pat2 = self._pattern()
             if pat2 is not None:
-                self._highlight_all_in_editors(pat2)
+                self._highlight_all(pat2)
         else:
             self.status.setText("Нечего заменять")
             self.status.setStyleSheet("color: #c5221f;")
 
 
-DEFAULT_BNF = {
-    "title": "",
-    "orig_name": "",
-    "author": "",
-    "lang": "en-ru",
-    "tags": [],
-    "favorite": False,
-    "description": "",
-}
-
-TAG_HISTORY_PATH = Path.home() / ".bnf_tag_history.json"
-
-
-def _load_tag_history() -> list[str]:
-    """Загрузить историю тегов из ~/.bnf_tag_history.json."""
-    try:
-        if TAG_HISTORY_PATH.exists():
-            data = json.loads(TAG_HISTORY_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return [str(t).strip() for t in data if str(t).strip()]
-    except Exception:
-        pass
-    return []
-
-
-def _save_tag_history(tags: list[str]) -> None:
-    """Сохранить уникальные теги в историю (сортировка по алфавиту)."""
-    existing = set(_load_tag_history())
-    for t in tags:
-        t = str(t).strip()
-        if t:
-            existing.add(t)
-    try:
-        TAG_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        sorted_tags = sorted(existing, key=lambda s: s.casefold())
-        TAG_HISTORY_PATH.write_text(
-            json.dumps(sorted_tags, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
-
-
-def _parse_filename_title_author(base_name: str) -> tuple[str, str]:
-    """Из имени файла вида «Название [Автор]» извлечь title и author.
-
-    base_name — stem без .en.md / .ru.md / .bnf.
-    """
-    name = base_name.strip()
-    for suf in (".en.md", ".ru.md", ".md", ".bnf"):
-        if name.lower().endswith(suf):
-            name = name[: -len(suf)]
-    m = re.match(r"^(.+?)\s*\[([^\]]+)\]\s*$", name)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    return name, ""
-
-
-class FlowLayout(QLayout):
-    """Layout, который размещает виджеты в несколько строк с переносом."""
-
-    def __init__(self, parent=None, margin=0, spacing=-1):
-        super().__init__(parent)
-        self._items = []
-        self._spacing = spacing
-        if margin >= 0:
-            self.setContentsMargins(margin, margin, margin, margin)
-
-    def addItem(self, item):
-        self._items.append(item)
-
-    def count(self):
-        return len(self._items)
-
-    def itemAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items[index]
-        return None
-
-    def takeAt(self, index):
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-
-    def expandingDirections(self):
-        return Qt.Orientation(0)
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
-
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._do_layout(rect, test_only=False)
-
-    def sizeHint(self):
-        return self.minimumSize()
-
-    def minimumSize(self):
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        m = self.contentsMargins()
-        size += QSize(m.left() + m.right(), m.top() + m.bottom())
-        return size
-
-    def spacing(self):
-        if self._spacing >= 0:
-            return self._spacing
-        return (
-            self.parentWidget()
-            and self.parentWidget()
-            .style()
-            .pixelMetric(self.parentWidget().style().PM_LayoutHorizontalSpacing)
-            or 6
-        )
-
-    def _do_layout(self, rect, test_only):
-        m = self.contentsMargins()
-        effective_rect = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
-        x = effective_rect.x()
-        y = effective_rect.y()
-        line_height = 0
-        spacing = self.spacing()
-
-        for item in self._items:
-            item_size = item.sizeHint()
-
-            next_x = x + item_size.width() + spacing
-            if next_x - spacing > effective_rect.right() and line_height > 0:
-                x = effective_rect.x()
-                y = y + line_height + spacing
-                next_x = x + item_size.width() + spacing
-                line_height = 0
-
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), item_size))
-
-            x = next_x
-            line_height = max(line_height, item_size.height())
-
-        return y + line_height - rect.y() + m.bottom()
-
-
-class TagChip(QWidget):
-    """Виджет-тег в виде 'пилюли'. Кликабельный, меняет цвет."""
-
-    clicked = Signal(str, bool)  # tag_name, is_selected
-
-    def __init__(self, text: str, selected: bool = False, parent=None):
-        super().__init__(parent)
-        self.text = text
-        self.selected = selected
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMouseTracking(True)
-        self._hover = False
-        self._update_style()
-
-    def _update_style(self):
-        """Обновить стиль и перерисовать."""
-        self.update()  # вызвать перерисовку
-
-    def paintEvent(self, event):
-        """Отрисовка чипа."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        if self.selected:
-            if self._hover:
-                bg = QColor("#1557b0")
-            else:
-                bg = QColor("#1a73e8")
-            fg = QColor("white")
-        else:
-            if self._hover:
-                bg = QColor("#d0d0d0")
-            else:
-                bg = QColor("#e0e0e0")
-            fg = QColor("#333")
-
-        # рисуем скруглённый прямоугольник
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        painter.drawRoundedRect(self.rect(), 12, 12)
-
-        # рисуем текст
-        painter.setPen(fg)
-        painter.setFont(self.font())
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.selected = not self.selected
-            self._update_style()
-            self.clicked.emit(self.text, self.selected)
-        super().mousePressEvent(event)
-
-    def enterEvent(self, event):
-        self._hover = True
-        self._update_style()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self._hover = False
-        self._update_style()
-        super().leaveEvent(event)
-
-    def sizeHint(self):
-        font_metrics = self.fontMetrics()
-        text_width = font_metrics.horizontalAdvance(self.text)
-        return QSize(text_width + 24, 28)
-
-
-class MetadataDialog(QDialog):
-    """Редактор метаданных книги (.bnf).
-
-    schema:
-      title, orig_name, author, lang (статично «en-ru»),
-      tags (list), favorite (bool), description
-    """
-
-    def __init__(
-        self,
-        parent,
-        data: dict | None = None,
-        path: str = "",
-        file_base_name: str = "",
-    ):
-        super().__init__(parent)
-        self.setWindowTitle("Метаданные книги (.bnf)")
-        self.setMinimumWidth(1100)
-        self.setMinimumHeight(800)
-
-        data = {**DEFAULT_BNF, **(data or {})}
-        tags_raw = data.get("tags") or []
-        if isinstance(tags_raw, str):
-            current_tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-        elif isinstance(tags_raw, list):
-            current_tags = [str(t).strip() for t in tags_raw if str(t).strip()]
-        else:
-            current_tags = []
-
-        # предзаполнение title/author из имени файла, если поля пусты
-        title = str(data.get("title") or "").strip()
-        author = str(data.get("author") or "").strip()
-        if file_base_name and (not title or not author):
-            parsed_title, parsed_author = _parse_filename_title_author(file_base_name)
-            if not title and parsed_title:
-                title = parsed_title
-            if not author and parsed_author:
-                author = parsed_author
-
-        layout = QVBoxLayout(self)
-        if path:
-            layout.addWidget(QLabel(f"Файл: {path}"))
-
-        form = QFormLayout()
-
-        self.title_edit = QLineEdit(title)
-        form.addRow("Название:", self.title_edit)
-
-        self.orig_name_edit = QLineEdit(str(data.get("orig_name") or ""))
-        form.addRow("Оригинальное название:", self.orig_name_edit)
-
-        self.author_edit = QLineEdit(author)
-        form.addRow("Автор:", self.author_edit)
-
-        # lang — статично en-ru
-        self.lang_edit = QLineEdit("en-ru")
-        self.lang_edit.setReadOnly(True)
-        self.lang_edit.setStyleSheet("background: #f0f0f0; color: #555;")
-        self.lang_edit.setToolTip("Пока фиксированное значение en-ru")
-        form.addRow("Язык:", self.lang_edit)
-
-        self.favorite_cb = QCheckBox()
-        fav = data.get("favorite")
-        if isinstance(fav, str):
-            fav = fav.lower() in ("1", "true", "yes", "да")
-        self.favorite_cb.setChecked(bool(fav))
-        form.addRow("Избранное", self.favorite_cb)
-
-        # --- теги: история + чекбоксы + добавление ---
-        tags_box = QGroupBox("Теги")
-        tags_layout = QVBoxLayout(tags_box)
-
-        self.tags_container = QWidget()
-        self.tags_flow = FlowLayout(self.tags_container, margin=4, spacing=4)
-        self.tags_container.setLayout(self.tags_flow)
-        self.tags_container.setMinimumHeight(80)
-        self.tags_container.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        tags_layout.addWidget(self.tags_container)
-
-        self._tag_chips: dict[str, TagChip] = {}
-
-        history = _load_tag_history()
-        all_known = sorted(
-            set(history) | set(current_tags),
-            key=lambda s: s.casefold(),
-        )
-
-        for tag in all_known:
-            self._add_tag_chip(tag, tag in current_tags)
-
-        add_row = QHBoxLayout()
-        self.new_tag_edit = QLineEdit()
-        self.new_tag_edit.setPlaceholderText("Новый тег…")
-        self.new_tag_edit.returnPressed.connect(self._add_new_tag)
-        btn_add_tag = QPushButton("Добавить")
-        btn_add_tag.clicked.connect(self._add_new_tag)
-        add_row.addWidget(self.new_tag_edit, 1)
-        add_row.addWidget(btn_add_tag)
-        tags_layout.addLayout(add_row)
-
-        form.addRow(tags_box)
-
-        self.description_edit = QTextEdit()
-        self.description_edit.setPlainText(str(data.get("description") or ""))
-        self.description_edit.setMaximumHeight(120)
-        form.addRow("Описание:", self.description_edit)
-
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _add_tag_chip(self, tag: str, selected: bool) -> None:
-        """Добавить чип тега в FlowLayout."""
-        if tag in self._tag_chips:
-            # уже есть — просто обновить состояние
-            chip = self._tag_chips[tag]
-            if chip.selected != selected:
-                chip.selected = selected
-                chip._update_style()
-            return
-
-        chip = TagChip(tag, selected)
-        chip.clicked.connect(self._on_tag_clicked)
-        self._tag_chips[tag] = chip
-        self.tags_flow.addWidget(chip)
-
-    def _on_tag_clicked(self, tag: str, selected: bool) -> None:
-        """Обработчик клика по чипу."""
-        pass  # состояние уже обновлено в TagChip
-
-    def _add_new_tag(self) -> None:
-        text = self.new_tag_edit.text().strip()
-        if not text:
-            return
-        self._add_tag_chip(text, True)
-        self.new_tag_edit.clear()
-
-    def result_data(self) -> dict:
-        selected_tags = [tag for tag, chip in self._tag_chips.items() if chip.selected]
-        all_tags = list(self._tag_chips.keys())
-        _save_tag_history(all_tags)
-
-        return {
-            "title": self.title_edit.text().strip(),
-            "orig_name": self.orig_name_edit.text().strip(),
-            "author": self.author_edit.text().strip(),
-            "lang": "en-ru",
-            "tags": selected_tags,
-            "favorite": self.favorite_cb.isChecked(),
-            "description": self.description_edit.toPlainText().strip(),
-        }
-
-
-class ParallelEditor(QMainWindow):
+class MarkdownEditor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Parallel Markdown Editor")
-        self.resize(1400, 800)
+        self.setWindowTitle("Markdown Editor")
+        self.resize(1200, 800)
 
-        self._en_path = None
-        self._ru_path = None
-        self._en_modified = False
-        self._ru_modified = False
-        self.current_file_base = None
+        self._file_path: Path | None = None
+        self._modified = False
 
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        root = QHBoxLayout(central)
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(2)
 
-        headers = QHBoxLayout()
-        self.lbl_en = QLabel("Оригинал (.en.md)")
-        self.lbl_en.setStyleSheet("font-weight: bold; color: #1a73e8;")
-        self.lbl_ru = QLabel("Перевод (.ru.md)")
-        self.lbl_ru.setStyleSheet("font-weight: bold; color: #188038;")
-        headers.addWidget(self.lbl_en, 1)
-        headers.addWidget(self.lbl_ru, 1)
-        root.addLayout(headers)
+        self.editor = CodeEditor()
+        self.outline = HeadingOutline()
 
-        editors_row = QHBoxLayout()
-        editors_row.setSpacing(2)
+        root.addWidget(self.editor, 1)
+        root.addWidget(self.outline, 0)
 
-        self.left_outline = HeadingOutline("left")
-        self.left_editor = CodeEditor(0)
-        self.right_editor = CodeEditor(1)
-        self.right_outline = HeadingOutline("right")
-
-        editors_row.addWidget(self.left_outline, 0)
-        editors_row.addWidget(self.left_editor, 1)
-        editors_row.addWidget(self.right_editor, 1)
-        editors_row.addWidget(self.right_outline, 0)
-        root.addLayout(editors_row, 1)
-
-        self.editors = [self.left_editor, self.right_editor]
-        self.left_editor.paragraph_clicked.connect(self._sync_paragraph)
-        self.right_editor.paragraph_clicked.connect(self._sync_paragraph)
-        self.left_editor.textChanged.connect(lambda: self._on_text_changed("en"))
-        self.right_editor.textChanged.connect(lambda: self._on_text_changed("ru"))
-        self.left_editor.cursorPositionChanged.connect(
-            lambda: self._update_active_heading(self.left_editor, self.left_outline)
-        )
-        self.right_editor.cursorPositionChanged.connect(
-            lambda: self._update_active_heading(self.right_editor, self.right_outline)
-        )
-        self.left_outline.heading_activated.connect(
-            lambda pos: self._goto_heading(self.left_editor, pos)
-        )
-        self.right_outline.heading_activated.connect(
-            lambda pos: self._goto_heading(self.right_editor, pos)
-        )
+        self.editor.textChanged.connect(self._on_text_changed)
+        self.editor.cursorPositionChanged.connect(self._update_active_heading)
+        self.outline.heading_activated.connect(self._goto_heading)
 
         self.setStatusBar(QStatusBar())
         self._create_menu()
-        self.statusBar().showMessage("Клик по строке — подсветка пары и выравнивание")
+        self.statusBar().showMessage("Готов")
 
     def _create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("&Файл")
 
-        open_action = QAction("Открыть пару…", self)
+        open_action = QAction("Открыть…", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self._open_files)
+        open_action.triggered.connect(self._open_file)
         file_menu.addAction(open_action)
 
         save_action = QAction("Сохранить", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
-        save_action.triggered.connect(self._save_files)
+        save_action.triggered.connect(self._save_file)
         file_menu.addAction(save_action)
 
         save_as_action = QAction("Сохранить как…", self)
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
-        save_as_action.triggered.connect(self._save_files_as)
+        save_as_action.triggered.connect(self._save_file_as)
         file_menu.addAction(save_as_action)
 
         file_menu.addSeparator()
-        meta_action = QAction("Метаданные книги (.bnf)…", self)
-        meta_action.setShortcut(QKeySequence("Ctrl+M"))
-        meta_action.triggered.connect(self._edit_metadata)
-        file_menu.addAction(meta_action)
 
-        file_menu.addSeparator()
+
         export_pdf_action = QAction("Экспорт в PDF…", self)
         export_pdf_action.triggered.connect(lambda: self._export("pdf"))
         file_menu.addAction(export_pdf_action)
@@ -1333,6 +861,7 @@ class ParallelEditor(QMainWindow):
         file_menu.addAction(export_epub_action)
 
         file_menu.addSeparator()
+
         quit_action = QAction("Выход", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
@@ -1349,82 +878,42 @@ class ParallelEditor(QMainWindow):
         replace_action.triggered.connect(self._show_find_replace)
         edit_menu.addAction(replace_action)
 
-        edit_menu.addSeparator()
-        correct_action = QAction("Исправить текст (обе панели)…", self)
-        correct_action.setShortcut(QKeySequence("Ctrl+Alt+L"))
-        correct_action.triggered.connect(self._correct_all_text)
-        edit_menu.addAction(correct_action)
+        if _HAS_CORRECTOR:
+            edit_menu.addSeparator()
+            correct_action = QAction("Исправить текст…", self)
+            correct_action.setShortcut(QKeySequence("Ctrl+Alt+L"))
+            correct_action.triggered.connect(self._correct_text)
+            edit_menu.addAction(correct_action)
 
-        tr_menu = menubar.addMenu("&Перевод")
-        google_action = QAction("Открыть в Google Chrome…", self)
-        google_action.triggered.connect(lambda: self._open_in_translator("google"))
-        tr_menu.addAction(google_action)
-
-        yandex_action = QAction("Открыть в Yandex Browser…", self)
-        yandex_action.triggered.connect(lambda: self._open_in_translator("yandex"))
-        tr_menu.addAction(yandex_action)
-
-    def _correct_all_text(self) -> None:
-        """Применить нормализацию ко всему тексту обеих панелей."""
+    def _correct_text(self) -> None:
+        if not _HAS_CORRECTOR:
+            return
         reply = QMessageBox.question(
             self,
             "Исправить текст",
-            "Применить правила корректировки ко всему тексту\nоригинала и перевода?",
+            "Применить правила корректировки ко всему тексту?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        en_path = self._en_path or (
-            Path(str(self.current_file_base) + ".en.md")
-            if self.current_file_base
-            else Path("document.en.md")
-        )
-        ru_path = self._ru_path or (
-            Path(str(self.current_file_base) + ".ru.md")
-            if self.current_file_base
-            else Path("document.ru.md")
-        )
+        text = self.editor.toPlainText()
+        path = self._file_path or Path("document.md")
+        new_text = normalize_text(text, path)
 
-        en_text = self.left_editor.toPlainText()
-        ru_text = self.right_editor.toPlainText()
-        new_en = normalize_text(en_text, en_path)
-        new_ru = normalize_text(ru_text, ru_path)
+        pos = self.editor.textCursor().position()
+        self.editor.setPlainText(new_text)
+        c = self.editor.textCursor()
+        c.setPosition(min(pos, max(0, len(new_text) - 1)))
+        self.editor.setTextCursor(c)
 
-        self.left_editor._syncing = True
-        self.right_editor._syncing = True
-        try:
-            en_pos = self.left_editor.textCursor().position()
-            ru_pos = self.right_editor.textCursor().position()
-            self.left_editor.setPlainText(new_en)
-            self.right_editor.setPlainText(new_ru)
-            for editor, pos, txt in (
-                (self.left_editor, en_pos, new_en),
-                (self.right_editor, ru_pos, new_ru),
-            ):
-                c = editor.textCursor()
-                c.setPosition(min(pos, max(0, len(txt) - 1)))
-                editor.setTextCursor(c)
-        finally:
-            self.left_editor._syncing = False
-            self.right_editor._syncing = False
-
-        self._en_modified = True
-        self._ru_modified = True
-        if self._en_path:
-            self.lbl_en.setText(f"Оригинал — {self._en_path.name} *")
-        if self._ru_path:
-            self.lbl_ru.setText(f"Перевод — {self._ru_path.name} *")
-        if hasattr(self, "left_outline"):
-            self.left_outline.rebuild(new_en)
-            self.right_outline.rebuild(new_ru)
-            self._update_active_heading(self.left_editor, self.left_outline)
-            self._update_active_heading(self.right_editor, self.right_outline)
+        self._modified = True
         self._update_title()
-        self.statusBar().showMessage("Текст исправлен (обе панели)", 4000)
+        self.outline.rebuild(new_text)
+        self._update_active_heading()
+        self.statusBar().showMessage("Текст исправлен", 4000)
 
     def _show_find(self) -> None:
-
         self._open_find_dialog(replace_mode=False)
 
     def _show_find_replace(self) -> None:
@@ -1435,138 +924,22 @@ class ParallelEditor(QMainWindow):
             self._find_dlg = FindReplaceDialog(self)
         dlg = self._find_dlg
 
-        # запомнить активную панель до открытия диалога
-        w = self.focusWidget()
-        if w is self.right_editor:
-            dlg._active_editor = self.right_editor
-        elif w is self.left_editor:
-            dlg._active_editor = self.left_editor
-        elif dlg._active_editor is None:
-            dlg._active_editor = self.left_editor
-
-        if isinstance(w, CodeEditor) and w.textCursor().hasSelection():
-            sel = w.textCursor().selectedText().replace(chr(0x2029), chr(10))
+        if self.editor.textCursor().hasSelection():
+            sel = self.editor.textCursor().selectedText().replace(chr(0x2029), chr(10))
             if sel and chr(10) not in sel:
                 dlg.find_edit.setText(sel)
 
         dlg.set_replace_mode(replace_mode)
         dlg.find_edit.setFocus()
-        dlg.find_edit.selectAll()
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
 
-    def _ensure_en_file(self) -> Path | None:
-        """Сохраняет текущий оригинал в .en.md и возвращает путь."""
-        en_text = self.left_editor.toPlainText()
-        if not en_text.strip():
-            QMessageBox.warning(self, "Перевод", "Оригинал (.en.md) пуст.")
-            return None
-
-        if self._en_path is not None:
-            try:
-                self._en_path.write_text(en_text, encoding="utf-8")
-                self._en_modified = False
-                return self._en_path
-            except Exception as e:
-                QMessageBox.critical(
-                    self, "Ошибка", f"Не удалось сохранить .en.md:\n{e}"
-                )
-                return None
-
-        if self.current_file_base:
-            p = Path(str(self.current_file_base) + ".en.md")
-            try:
-                p.write_text(en_text, encoding="utf-8")
-                self._en_path = p
-                return p
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
-                return None
-
-        # временный файл
-        try:
-            td = Path(tempfile.gettempdir()) / "parallel_editor"
-            td.mkdir(parents=True, exist_ok=True)
-            p = td / "original.en.md"
-            p.write_text(en_text, encoding="utf-8")
-            return p
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Ошибка", f"Не удалось создать временный файл:\n{e}"
-            )
-            return None
-
-    def _find_browser(self, service: str) -> str | None:
-        """Путь к браузеру: google → google-chrome-stable; yandex → yandex-browser-stable."""
-        if service == "google":
-            candidates = [
-                "google-chrome-stable",
-                "google-chrome",
-                "chromium-browser",
-                "chromium",
-            ]
-        else:
-            candidates = [
-                "yandex-browser-stable",
-                "yandex-browser",
-            ]
-        for name in candidates:
-            path = shutil.which(name)
-            if path:
-                return path
-        return None
-
-    def _open_in_translator(self, service: str) -> None:
-        """Открывает .en.md в Chrome (Google) или Yandex Browser.
-        service: "google" | "yandex"
-        """
-        en_path = self._ensure_en_file()
-        if en_path is None:
-            return
-        browser = self._find_browser(service)
-        if browser is None:
-            if service == "google":
-                msg = (
-                    "Не найден google-chrome-stable (или google-chrome / chromium).\n"
-                    "Установите Google Chrome."
-                )
-            else:
-                msg = (
-                    "Не найден yandex-browser-stable (или yandex-browser).\n"
-                    "Установите Yandex Browser."
-                )
-            QMessageBox.warning(self, "Перевод", msg)
-            return
-        file_url = en_path.resolve().as_uri()
-        if service == "google":
-            label = "Google Chrome"
-        else:
-            label = "Yandex Browser"
-        try:
-            subprocess.Popen(
-                [browser, file_url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось запустить {label}:\n{e}")
-            return
-        self.statusBar().showMessage(f"Открыто в {label}: {en_path.name}", 5000)
-
     def _export(self, fmt: str) -> None:
-        """Экспорт в PDF или EPUB: таблица или построчно."""
+
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Экспорт в {fmt.upper()}")
         layout = QVBoxLayout(dlg)
-
-        layout.addWidget(QLabel("Формат вёрстки:"))
-        radio_table = QRadioButton("Таблица: две колонки (оригинал | перевод)")
-        radio_line = QRadioButton("Построчно: оригинал, затем перевод (блоками)")
-        radio_table.setChecked(True)
-        layout.addWidget(radio_table)
-        layout.addWidget(radio_line)
 
         open_after = QCheckBox("Открыть после сохранения")
         open_after.setChecked(True)
@@ -1582,7 +955,6 @@ class ParallelEditor(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        layout_mode = "table" if radio_table.isChecked() else "interlinear"
         should_open = open_after.isChecked()
 
         if fmt == "pdf":
@@ -1592,17 +964,14 @@ class ParallelEditor(QMainWindow):
             filt = "EPUB (*.epub)"
             default_ext = ".epub"
 
-        default_name = "parallel"
-        if self.current_file_base:
-            default_name = Path(self.current_file_base).name
-        elif self._en_path:
-            default_name = self._en_path.stem.replace(".en", "")
+        default_name = "document"
+        if self._file_path:
+            default_name = self._file_path.stem
 
-        suffix = "_table" if layout_mode == "table" else "_lines"
         path, _ = QFileDialog.getSaveFileName(
             self,
             f"Сохранить {fmt.upper()}",
-            f"{default_name}{suffix}{default_ext}",
+            f"{default_name}{default_ext}",
             filt,
         )
         if not path:
@@ -1610,12 +979,14 @@ class ParallelEditor(QMainWindow):
         if not path.lower().endswith(default_ext):
             path += default_ext
 
-        en_text = self.left_editor.toPlainText()
-        ru_text = self.right_editor.toPlainText()
+        text = self.editor.toPlainText()
         title = default_name
 
         try:
-            export_file(path, en_text, ru_text, layout=layout_mode, title=title)
+            # export_file ожидает два текста; для одного файла дублируем
+            # или передаём пустую строку — зависит от реализации export_parallel.
+            # Здесь передаём один и тот же текст дважды как fallback.
+            export_file(path, text, "", layout="single", title=title)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта", str(e))
             return
@@ -1639,280 +1010,86 @@ class ParallelEditor(QMainWindow):
                         f"Файл сохранён, но не удалось открыть:\n{e}",
                     )
 
-    def _sync_paragraph(
-        self, editor_idx: int, pos: int, do_scroll: bool = True
-    ) -> None:
-        """Подсветка строки и пары; выравнивание по Y.
-        Пара = тот же абзац по индексу (1↔1) на другой стороне.
-        """
-        source = self.editors[editor_idx]
-        target = self.editors[1 - editor_idx]
-        para_idx = source.get_paragraph_index(pos)
-        if para_idx < 0:
-            return
-        target_pos = target.get_paragraph_position(para_idx)
-        if target_pos is None:
-            self.statusBar().showMessage(
-                f"Строка {para_idx + 1}: нет пары на другой стороне"
-            )
-            target.clear_line_highlight()
-            return
-        src_para_pos = source.get_paragraph_position(para_idx)
-        source_cursor = source.textCursor()
-        if src_para_pos is not None:
-            source_cursor.setPosition(src_para_pos)
-        source_rect = source.cursorRect(source_cursor)
-        source_y = source_rect.top()
-        target._syncing = True
-        target_cursor = QTextCursor(target.document())
-        target_cursor.setPosition(target_pos)
-        target.setTextCursor(target_cursor)
-        # source.highlight_line_at(pos, QColor(200, 230, 255))
-        # target.highlight_line_at(target_pos, QColor(200, 245, 200))
-        target_rect = target.cursorRect(target_cursor)
-        target_y = target_rect.top()
-        if do_scroll:
-            diff = source_y - target_y
-            if abs(diff) > 5:
-                line_height = target_rect.height() if target_rect.height() > 0 else 16
-                scrollbar = target.verticalScrollBar()
-                scroll_units = int(diff / line_height)
-                scrollbar.setValue(scrollbar.value() - scroll_units)
-        target._syncing = False
-        self.statusBar().showMessage(f"Строка {para_idx + 1} выровнена", 2500)
-
-    def _on_text_changed(self, side: str) -> None:
-        if side == "en":
-            if self.left_editor._syncing:
-                return
-            self._en_modified = True
-            name = self._en_path.name if self._en_path else "Оригинал (.en.md)"
-            self.lbl_en.setText(f"Оригинал — {name} *")
-            self.left_outline.rebuild(self.left_editor.toPlainText())
-            self._update_active_heading(self.left_editor, self.left_outline)
-        else:
-            if self.right_editor._syncing:
-                return
-            self._ru_modified = True
-            name = self._ru_path.name if self._ru_path else "Перевод (.ru.md)"
-            self.lbl_ru.setText(f"Перевод — {name} *")
-            self.right_outline.rebuild(self.right_editor.toPlainText())
-            self._update_active_heading(self.right_editor, self.right_outline)
+    def _on_text_changed(self) -> None:
+        self._modified = True
+        name = self._file_path.name if self._file_path else "Новый документ"
+        self.outline.rebuild(self.editor.toPlainText())
+        self._update_active_heading()
         self._update_title()
 
-    def _update_active_heading(
-        self, editor: CodeEditor, outline: HeadingOutline
-    ) -> None:
-        pos = editor.textCursor().position()
-        outline.highlight_for_position(pos)
+    def _update_active_heading(self) -> None:
+        pos = self.editor.textCursor().position()
+        self.outline.highlight_for_position(pos)
 
-    def _goto_heading(self, editor: CodeEditor, pos: int) -> None:
-        """Перейти к заголовку по клику в оглавлении."""
-        cursor = editor.textCursor()
+    def _goto_heading(self, pos: int) -> None:
+        cursor = self.editor.textCursor()
         cursor.setPosition(pos)
-        editor.setTextCursor(cursor)
-        editor.centerCursor()
-        editor.setFocus()
-        self._sync_paragraph(editor.editor_idx, pos, True)
-        self._sync_paragraph(editor.editor_idx, pos, True)
+        self.editor.setTextCursor(cursor)
+        self.editor.centerCursor()
+        self.editor.setFocus()
 
-    def _open_files(self) -> None:
+    def _open_file(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Открыть .en.md / .ru.md",
+            "Открыть Markdown",
             "",
-            "Markdown (*.en.md *.ru.md *.md);;All (*)",
+            "Markdown (*.md);;All (*)",
         )
         if not file_path:
             return
 
-        if file_path.endswith(".en.md"):
-            base = file_path[:-6]
-            self._en_path = Path(file_path)
-            self._ru_path = Path(base + ".ru.md")
-        elif file_path.endswith(".ru.md"):
-            base = file_path[:-6]
-            self._ru_path = Path(file_path)
-            self._en_path = Path(base + ".en.md")
+        self._file_path = Path(file_path)
+        self._load_file()
+
+    def _load_file(self) -> None:
+        if self._file_path and self._file_path.exists():
+            self.editor.setPlainText(self._file_path.read_text(encoding="utf-8"))
+            self._modified = False
+            self.outline.rebuild(self.editor.toPlainText())
+            self._update_active_heading()
+            self._update_title()
+            self.statusBar().showMessage(f"Открыт: {self._file_path.name}", 2000)
         else:
-            base = file_path
-            self._en_path = Path(file_path)
-            self._ru_path = Path(file_path + ".ru.md")
+            self.editor.setPlainText("")
+            self._modified = False
+            self.outline.rebuild("")
+            self._update_title()
 
-        self.current_file_base = base
-        self._load_files()
-
-    def _load_files(self) -> None:
-        self.left_editor._syncing = True
-        self.right_editor._syncing = True
-
-        en_path = (
-            Path(self.current_file_base + ".en.md")
-            if self.current_file_base
-            else self._en_path
-        )
-        ru_path = (
-            Path(self.current_file_base + ".ru.md")
-            if self.current_file_base
-            else self._ru_path
-        )
-
-        if en_path and en_path.exists():
-            self.left_editor.setPlainText(en_path.read_text(encoding="utf-8"))
-            self._en_path = en_path
-            self._en_modified = False
-            self.lbl_en.setText(f"Оригинал — {en_path.name}")
-        else:
-            self.left_editor.setPlainText("")
-            self.lbl_en.setText("Оригинал (.en.md)")
-
-        if ru_path and ru_path.exists():
-            self.right_editor.setPlainText(ru_path.read_text(encoding="utf-8"))
-            self._ru_path = ru_path
-            self._ru_modified = False
-            self.lbl_ru.setText(f"Перевод — {ru_path.name}")
-        else:
-            self.right_editor.setPlainText("")
-            self.lbl_ru.setText("Перевод (.ru.md)")
-
-        self.left_editor._syncing = False
-        self.right_editor._syncing = False
-        self.left_outline.rebuild(self.left_editor.toPlainText())
-        self.right_outline.rebuild(self.right_editor.toPlainText())
-        self._update_active_heading(self.left_editor, self.left_outline)
-        self._update_active_heading(self.right_editor, self.right_outline)
-        self._update_title()
-        self.statusBar().showMessage("Файлы загружены", 2000)
-
-    def _save_files(self) -> None:
-        if not self.current_file_base and not self._en_path:
-            self._save_files_as()
+    def _save_file(self) -> None:
+        if not self._file_path:
+            self._save_file_as()
             return
 
-        if self.current_file_base:
-            en_path = Path(self.current_file_base + ".en.md")
-            ru_path = Path(self.current_file_base + ".ru.md")
-        else:
-            en_path = self._en_path
-            ru_path = self._ru_path
-
         try:
-            if en_path:
-                en_path.write_text(self.left_editor.toPlainText(), encoding="utf-8")
-                self._en_path = en_path
-                self._en_modified = False
-                self.lbl_en.setText(f"Оригинал — {en_path.name}")
-            if ru_path:
-                ru_path.write_text(self.right_editor.toPlainText(), encoding="utf-8")
-                self._ru_path = ru_path
-                self._ru_modified = False
-                self.lbl_ru.setText(f"Перевод — {ru_path.name}")
+            self._file_path.write_text(self.editor.toPlainText(), encoding="utf-8")
+            self._modified = False
+            self._update_title()
+            self.statusBar().showMessage(f"Сохранено: {self._file_path.name}", 2000)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
-            return
 
-        self._update_title()
-        self.statusBar().showMessage("Сохранено", 2000)
-
-    def _save_files_as(self) -> None:
+    def _save_file_as(self) -> None:
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить как .en.md", "", "Markdown (*.en.md)"
+            self, "Сохранить как", "", "Markdown (*.md)"
         )
         if not file_path:
             return
-        if file_path.endswith(".en.md"):
-            base = file_path[:-6]
-        else:
-            base = file_path
-        self.current_file_base = base
-        self._save_files()
-
-    def _bnf_path(self) -> Path | None:
-        """book.en.md / book.ru.md → book.bnf"""
-        if self.current_file_base:
-            base = str(self.current_file_base)
-            # base уже без .en.md/.ru.md
-            return Path(base + ".bnf")
-        if self._en_path:
-            p = self._en_path
-            name = p.name
-            if name.endswith(".en.md"):
-                return p.with_name(name[:-6] + ".bnf")
-            return p.with_suffix(".bnf")
-        return None
-
-    def _load_bnf(self) -> dict:
-        path = self._bnf_path()
-        if path is None or not path.exists():
-            return dict(DEFAULT_BNF)
-        try:
-            return {**DEFAULT_BNF, **json.loads(path.read_text(encoding="utf-8"))}
-        except Exception:
-            return dict(DEFAULT_BNF)
-
-    def _save_bnf(self, data: dict) -> bool:
-        path = self._bnf_path()
-        print("save to file" + str(path))
-        if path is None:
-            QMessageBox.warning(
-                self,
-                "Метаданные",
-                "Сначала откройте или сохраните пару .en.md / .ru.md.",
-            )
-            return False
-        try:
-            path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            self.statusBar().showMessage(f"Метаданные: {path}", 4000)
-            return True
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить .bnf:\n{e}")
-            return False
-
-    def _edit_metadata(self) -> None:
-        path = self._bnf_path()
-        data = self._load_bnf()
-        # имя файла для предзаполнения title/author: «Название [Автор]»
-        file_base_name = ""
-        if self.current_file_base:
-            file_base_name = Path(str(self.current_file_base)).name
-        elif self._en_path:
-            name = self._en_path.name
-            if name.endswith(".en.md"):
-                file_base_name = name[:-6]
-            else:
-                file_base_name = self._en_path.stem
-        self.dlg = MetadataDialog(
-            self,
-            data=data,
-            path=str(path) if path else "",
-            file_base_name=file_base_name,
-        )
-        self.dlg.finished.connect(self._on_dialog_finished)
-        self.dlg.show()
-
-    def _on_dialog_finished(self, result: int):
-        if result != QDialog.DialogCode.Accepted:
-            return
-        self._save_bnf(self.dlg.result_data())
+        if not file_path.endswith(".md"):
+            file_path += ".md"
+        self._file_path = Path(file_path)
+        self._save_file()
 
     def _update_title(self) -> None:
-        parts = []
-        if self._en_path:
-            parts.append(self._en_path.name)
-        if self._ru_path:
-            parts.append(self._ru_path.name)
-        title = "Parallel Markdown Editor"
-        if parts:
-            title = " | ".join(parts) + " — " + title
-        if self._en_modified or self._ru_modified:
+        if self._file_path:
+            title = f"{self._file_path.name} — Markdown Editor"
+        else:
+            title = "Markdown Editor"
+        if self._modified:
             title = "• " + title
         self.setWindowTitle(title)
 
     def closeEvent(self, event) -> None:
-        if self._en_modified or self._ru_modified:
+        if self._modified:
             reply = QMessageBox.question(
                 self,
                 "Несохранённые изменения",
@@ -1922,7 +1099,7 @@ class ParallelEditor(QMainWindow):
                 | QMessageBox.StandardButton.Cancel,
             )
             if reply == QMessageBox.StandardButton.Save:
-                self._save_files()
+                self._save_file()
                 event.accept()
             elif reply == QMessageBox.StandardButton.Discard:
                 event.accept()
@@ -1935,17 +1112,15 @@ class ParallelEditor(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = ParallelEditor()
+    app.setOrganizationName("MarkdownEditor")
+    app.setApplicationName("MarkdownEditor")
+    window = MarkdownEditor()
     window.show()
 
     if len(sys.argv) > 1:
         file_path = sys.argv[1]
-        if file_path.endswith(".en.md") or file_path.endswith(".ru.md"):
-            base = file_path[:-6]
-        else:
-            base = file_path
-        window.current_file_base = base
-        window._load_files()
+        window._file_path = Path(file_path)
+        window._load_file()
 
     sys.exit(app.exec())
 
