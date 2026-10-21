@@ -986,7 +986,7 @@ class MarkdownEditor(QMainWindow):
             # export_file ожидает два текста; для одного файла дублируем
             # или передаём пустую строку — зависит от реализации export_parallel.
             # Здесь передаём один и тот же текст дважды как fallback.
-            export_file(path, text, "", layout="single", title=title)
+            export_file(path, text, title=title)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка экспорта", str(e))
             return

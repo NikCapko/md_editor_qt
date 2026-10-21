@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Экспорт текста в PDF и EPUB.
-
-Поддерживаемые layout:
-  single      — одна колонка (для обычного .md файла)
-  table       — таблица из 2 колонок (оригинал | перевод)
-  interlinear — блоки оригинал → перевод по очереди
-"""
+"""Экспорт текста в PDF и EPUB (одна колонка)."""
 
 from __future__ import annotations
 
@@ -16,7 +10,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
 # ---------------------------------------------------------------------------
-# Абзацы и обработка текста
+# Обработка текста
 # ---------------------------------------------------------------------------
 
 
@@ -35,18 +29,6 @@ def split_paragraphs(text: str) -> list[str]:
     if buf:
         paras.append("\n".join(buf))
     return paras
-
-
-def pair_paragraphs(en_text: str, ru_text: str) -> list[tuple[str, str]]:
-    en = split_paragraphs(en_text)
-    ru = split_paragraphs(ru_text)
-    n = max(len(en), len(ru))
-    pairs = []
-    for i in range(n):
-        a = en[i] if i < len(en) else ""
-        b = ru[i] if i < len(ru) else ""
-        pairs.append((a, b))
-    return pairs
 
 
 def strip_md_light(text: str) -> str:
@@ -92,33 +74,17 @@ def _find_font() -> tuple[str, str]:
     return "", ""
 
 
-def export_pdf(
-    path: str | Path,
-    en_text: str,
-    ru_text: str = "",
-    layout: str = "table",
-    title: str = "Document",
-) -> None:
+def export_pdf(path: str | Path, text: str, title: str = "Document") -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_LEFT, TA_CENTER
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.platypus import (
-        KeepTogether,
-        Paragraph,
-        SimpleDocTemplate,
-        Spacer,
-        Table,
-        TableStyle,
-    )
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
     path = Path(path)
-
-    # Автоматически переключаемся в single, если второго текста нет
-    is_single = (not ru_text.strip()) or (layout == "single")
-    pairs = pair_paragraphs(en_text, ru_text) if not is_single else []
+    paras = split_paragraphs(text)
 
     reg, bold = _find_font()
     font_name = "DejaVu"
@@ -132,31 +98,17 @@ def export_pdf(
 
     styles = getSampleStyleSheet()
 
-    # Стили для PDF
-    cell_style = ParagraphStyle(
-        "Cell", parent=styles["Normal"], fontName=font_name, fontSize=10, leading=14, alignment=TA_LEFT
-    )
-    single_style = ParagraphStyle(
-        "Single", parent=styles["Normal"], fontName=font_name, fontSize=11, leading=16, spaceAfter=6
+    title_style = ParagraphStyle(
+        "Title", parent=styles["Title"], fontName=font_bold, fontSize=16,
+        spaceAfter=12, alignment=TA_CENTER,
     )
     heading_style = ParagraphStyle(
         "Heading", parent=styles["Normal"], fontName=font_bold, fontSize=14, leading=18,
         spaceBefore=12, spaceAfter=6, textColor=colors.HexColor("#333333")
     )
-    head_style = ParagraphStyle(
-        "Head", parent=styles["Normal"], fontName=font_bold, fontSize=10, leading=13
-    )
-    en_block = ParagraphStyle(
-        "EnBlock", parent=styles["Normal"], fontName=font_name, fontSize=10, leading=13,
-        textColor=colors.HexColor("#1a73e8"), spaceAfter=2,
-    )
-    ru_block = ParagraphStyle(
-        "RuBlock", parent=styles["Normal"], fontName=font_name, fontSize=10, leading=13,
-        textColor=colors.HexColor("#188038"), spaceAfter=10,
-    )
-    title_style = ParagraphStyle(
-        "Title", parent=styles["Title"], fontName=font_bold, fontSize=16,
-        spaceAfter=12, alignment=TA_CENTER,
+    body_style = ParagraphStyle(
+        "Body", parent=styles["Normal"], fontName=font_name, fontSize=11, leading=16,
+        spaceAfter=6, alignment=TA_LEFT
     )
 
     def p(text: str, style: ParagraphStyle) -> Paragraph:
@@ -173,39 +125,12 @@ def export_pdf(
         bottomMargin=0,
         title=title,
     )
+
     story = [Paragraph(html.escape(title), title_style), Spacer(1, 12)]
 
-    if is_single:
-        paras = split_paragraphs(en_text)
-        for para in paras:
-            style = heading_style if is_heading(para) else single_style
-            story.append(p(para, style))
-
-    elif layout == "table":
-        data = [[Paragraph("Оригинал", head_style), Paragraph("Перевод", head_style)]]
-        for en, ru in pairs:
-            data.append([p(en, cell_style), p(ru, cell_style)])
-
-        table = Table(data, colWidths=[270, 270])
-        table.setStyle(
-            TableStyle(
-                [
-                    ("FONTNAME", (0, 0), (-1, -1), font_name),
-                    ("FONTSIZE", (0, 0), (-1, -1), 9),
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-                ]
-            )
-        )
-        story.append(table)
-    else:
-        # interlinear
-        for en, ru in pairs:
-            block = [p(en, en_block), p(ru, ru_block)]
-            story.append(KeepTogether(block))
+    for para in paras:
+        style = heading_style if is_heading(para) else body_style
+        story.append(p(para, style))
 
     doc.build(story)
 
@@ -222,77 +147,21 @@ def _format_epub_para(text: str) -> str:
     return f"<p>{safe or '—'}</p>"
 
 
-def export_epub(
-    path: str | Path,
-    en_text: str,
-    ru_text: str = "",
-    layout: str = "table",
-    title: str = "Document",
-) -> None:
+def export_epub(path: str | Path, text: str, title: str = "Document") -> None:
     path = Path(path)
-
-    is_single = (not ru_text.strip()) or (layout == "single")
-    pairs = pair_paragraphs(en_text, ru_text) if not is_single else []
+    paras = split_paragraphs(text)
+    blocks = [_format_epub_para(p) for p in paras]
 
     book_id = "doc-" + re.sub(r"[^a-zA-Z0-9]+", "-", title)[:40]
 
-    if is_single:
-        paras = split_paragraphs(en_text)
-        blocks = [_format_epub_para(p) for p in paras]
-        body = f"<h1>{xml_escape(title)}</h1>\n" + "\n".join(blocks)
-        css = """
-        body { font-family: serif; line-height: 1.6; padding: 1em; }
-        h1 { font-size: 1.6em; text-align: center; margin-bottom: 1.5em; }
-        h2 { font-size: 1.3em; margin-top: 1.5em; margin-bottom: 0.5em; color: #333; }
-        p { margin-bottom: 1em; text-align: justify; }
-        """
-    elif layout == "table":
-        rows = []
-        for en, ru in pairs:
-            rows.append(
-                "<tr>"
-                f"<td class='en'>{_format_epub_para(en)}</td>"
-                f"<td class='ru'>{_format_epub_para(ru)}</td>"
-                "</tr>"
-            )
-        body = (
-            f"<h1>{xml_escape(title)}</h1>\n"
-            "<table>\n"
-            "<thead><tr><th>Original</th><th>Translation</th></tr></thead>\n"
-            "<tbody>\n" + "\n".join(rows) + "\n</tbody></table>"
-        )
-        css = """
-        body { font-family: sans-serif; padding: 1em; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { border: 1px solid #bbb; padding: 0.5em; vertical-align: top; width: 50%; }
-        th { background: #e8eaed; font-size: 0.9em; }
-        tr:nth-child(even) td { background: #f8f9fa; }
-        .en { color: #1a73e8; }
-        .ru { color: #188038; }
-        h1 { font-size: 1.4em; text-align: center; }
-        h2 { font-size: 1.1em; margin-top: 0; }
-        p { margin: 0; }
-        """
-    else:
-        # interlinear
-        blocks = []
-        for en, ru in pairs:
-            blocks.append(
-                f"<div class='pair'>"
-                f"{_format_epub_para(en)}"
-                f"{_format_epub_para(ru)}"
-                f"</div>"
-            )
-        body = f"<h1>{xml_escape(title)}</h1>\n" + "\n".join(blocks)
-        css = """
-        body { font-family: sans-serif; padding: 1em; }
-        .pair { margin-bottom: 1.2em; padding-bottom: 0.6em; border-bottom: 1px solid #e0e0e0; }
-        .en { color: #1a73e8; margin: 0 0 0.3em 0; }
-        .ru { color: #188038; margin: 0; }
-        h1 { font-size: 1.4em; text-align: center; }
-        h2 { font-size: 1.1em; margin: 0 0 0.3em 0; }
-        p { margin: 0; }
-        """
+    body = f"<h1>{xml_escape(title)}</h1>\n" + "\n".join(blocks)
+
+    css = """
+    body { font-family: serif; line-height: 1.6; padding: 1em; color: #111; }
+    h1 { font-size: 1.6em; text-align: center; margin-bottom: 1.5em; }
+    h2 { font-size: 1.3em; margin-top: 1.5em; margin-bottom: 0.5em; color: #333; }
+    p { margin-bottom: 1em; text-align: justify; }
+    """
 
     chapter = f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -356,22 +225,20 @@ def export_epub(
         zf.writestr("OEBPS/style.css", css)
 
 
-def export_file(
-    path: str | Path,
-    text: str,
-    text2: str = "",
-    layout: str = "single",
-    title: str = "Document",
-) -> None:
+# ---------------------------------------------------------------------------
+# Главный интерфейс
+# ---------------------------------------------------------------------------
+
+
+def export_file(path: str | Path, text: str, title: str = "Document") -> None:
     """
-    Универсальная функция экспорта.
-    Если text2 пуст или layout == "single", экспортирует как один документ.
+    Экспортирует один текст в PDF или EPUB в зависимости от расширения файла.
     """
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        export_pdf(path, text, text2, layout=layout, title=title)
+        export_pdf(path, text, title=title)
     elif suffix == ".epub":
-        export_epub(path, text, text2, layout=layout, title=title)
+        export_epub(path, text, title=title)
     else:
-        raise ValueError(f"Неподдерживаемый формат: {suffix}")
+        raise ValueError(f"Неподдерживаемый формат: {suffix}. Используйте .pdf или .epub")
