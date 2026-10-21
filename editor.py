@@ -171,7 +171,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 class CodeEditor(QPlainTextEdit):
     """Редактор с номерами строк; синхронизация только по клику мыши."""
 
-    paragraph_clicked = Signal(int, int)  # editor_idx, cursor_position
+    paragraph_clicked = Signal(int, int, bool)  # editor_idx, pos, do_scroll
 
     def __init__(self, editor_idx: int = 0):
         super().__init__()
@@ -231,15 +231,15 @@ class CodeEditor(QPlainTextEdit):
         self.highlighter.rehighlightBlock(current_block)
         self.highlighter.prev_block_number = current_block.blockNumber()
 
-        if self._mouse_click:
+        if not self._syncing:
+            pos = self.textCursor().position()
+            # mouse_click=True → ещё и выровнять скролл; иначе только подсветка пары
+            do_scroll = self._mouse_click
             self._mouse_click = False
-            if not self._syncing:
-                # только подсветка (highlighter + ExtraSelection), без текстового selection
-                pos = self.textCursor().position()
-                self.paragraph_clicked.emit(self.editor_idx, pos)
+            self.paragraph_clicked.emit(self.editor_idx, pos, do_scroll)
 
     def highlight_line_at(self, pos: int, color: QColor) -> None:
-        """Подсветка только одной строки по позиции."""
+        """Подсветка одной конкретной строки (на всю ширину), без текстового selection."""
         block = self.document().findBlock(pos)
         if not block.isValid():
             self.setExtraSelections([])
@@ -247,13 +247,17 @@ class CodeEditor(QPlainTextEdit):
         sel = QTextEdit.ExtraSelection()
         sel.format.setBackground(color)
         sel.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        # курсор на блок, без выделения символов
         c = QTextCursor(block)
         c.clearSelection()
         sel.cursor = c
         self.setExtraSelections([sel])
+        # перерисовать viewport — иначе FullWidthSelection иногда не виден
+        self.viewport().update()
 
     def clear_line_highlight(self) -> None:
         self.setExtraSelections([])
+        self.viewport().update()
 
     def highlight_search_matches(
         self,
@@ -296,47 +300,106 @@ class CodeEditor(QPlainTextEdit):
     def clear_search_highlight(self) -> None:
         self.setExtraSelections([])
 
-    def get_paragraph_index(self, pos: int) -> int:
+    def get_line_info(self, pos: int) -> dict | None:
+        """Информация о строке в позиции pos.
+
+        Для непустой строки: абзац (группы непустых строк подряд) + смещение внутри него.
+        Для пустой: is_empty=True, привязка 1:1 по номеру строки.
+        """
         block = self.document().findBlock(pos)
         if not block.isValid():
-            return -1
+            return None
 
-        start_block = block
-        while start_block.previous().isValid() and start_block.previous().text().strip():
-            start_block = start_block.previous()
+        line_no = block.blockNumber()
+        is_empty = not block.text().strip()
 
+        if is_empty:
+            return {
+                "line_no": line_no,
+                "is_empty": True,
+                "para_idx": -1,
+                "offset": 0,
+                "para_start_line": line_no,
+                "para_end_line": line_no + 1,
+                "position": block.position(),
+            }
+
+        # начало абзаца: назад по непустым
+        start = block
+        while start.previous().isValid() and start.previous().text().strip():
+            start = start.previous()
+        # конец абзаца
+        end = block
+        while end.next().isValid() and end.next().text().strip():
+            end = end.next()
+
+        para_start_line = start.blockNumber()
+        para_end_line = end.blockNumber() + 1
+        offset = line_no - para_start_line
+
+        # индекс абзаца среди непустых групп
         idx = 0
         b = self.document().begin()
         in_para = False
         while b.isValid():
-            text = b.text()
-            if text.strip():
+            if b.text().strip():
                 if not in_para:
                     in_para = True
-                    if b == start_block:
-                        return idx
+                    if b == start:
+                        break
                     idx += 1
             else:
                 in_para = False
             b = b.next()
-        return -1
 
-    def get_paragraph_position(self, idx: int):
+        return {
+            "line_no": line_no,
+            "is_empty": False,
+            "para_idx": idx,
+            "offset": offset,
+            "para_start_line": para_start_line,
+            "para_end_line": para_end_line,
+            "position": block.position(),
+        }
+
+    def get_paragraph_range(self, para_idx: int) -> tuple[int, int] | None:
+        """(start_line, end_line exclusive) для абзаца para_idx, или None."""
         count = 0
         b = self.document().begin()
         in_para = False
+        start_line = None
         while b.isValid():
-            text = b.text()
-            if text.strip():
+            if b.text().strip():
                 if not in_para:
                     in_para = True
-                    if count == idx:
-                        return b.position()
+                    if count == para_idx:
+                        start_line = b.blockNumber()
                     count += 1
+                if start_line is not None and count > para_idx + 1:
+                    # следующий абзац начался — но count уже увеличен на следующем
+                    pass
             else:
+                if in_para and start_line is not None and count == para_idx + 1:
+                    return (start_line, b.blockNumber())
                 in_para = False
             b = b.next()
+        if start_line is not None:
+            return (start_line, self.blockCount())
         return None
+
+    def get_paragraph_position(self, idx: int):
+        """Позиция начала абзаца idx (для совместимости)."""
+        r = self.get_paragraph_range(idx)
+        if r is None:
+            return None
+        block = self.document().findBlockByNumber(r[0])
+        return block.position() if block.isValid() else None
+
+    def get_paragraph_index(self, pos: int) -> int:
+        info = self.get_line_info(pos)
+        if info is None or info["is_empty"]:
+            return -1
+        return info["para_idx"]
 
 
 
@@ -668,7 +731,7 @@ class ParallelEditor(QMainWindow):
         self.setStatusBar(QStatusBar())
         self._create_menu()
         self.statusBar().showMessage(
-            "Клик по абзацу — выделить и выровнять парный абзац"
+            "Клик по строке — подсветка пары и выравнивание"
         )
 
     def _create_menu(self):
@@ -818,13 +881,11 @@ class ParallelEditor(QMainWindow):
 
     def _open_in_translator(self, service: str) -> None:
         """Открывает .en.md в Chrome (Google) или Yandex Browser.
-
         service: "google" | "yandex"
         """
         en_path = self._ensure_en_file()
         if en_path is None:
             return
-
         browser = self._find_browser(service)
         if browser is None:
             if service == "google":
@@ -839,17 +900,12 @@ class ParallelEditor(QMainWindow):
                 )
             QMessageBox.warning(self, "Перевод", msg)
             return
-
-        file_url = en_path.resolve().as_uri()  # file:///...
-
-        # Страница переводчика + файл оригинала
+        file_url = en_path.resolve().as_uri()
         if service == "google":
             label = "Google Chrome"
         else:
             label = "Yandex Browser"
-
         try:
-            # файл .en.md и страница переводчика
             subprocess.Popen(
                 [browser, file_url],
                 stdout=subprocess.DEVNULL,
@@ -859,10 +915,10 @@ class ParallelEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось запустить {label}:\n{e}")
             return
-
         self.statusBar().showMessage(
-            f"Открыто в {label}: {en_path.name} + переводчик", 5000
+            f"Открыто в {label}: {en_path.name}", 5000
         )
+
 
     def _export(self, fmt: str) -> None:
         """Экспорт в PDF или EPUB: таблица или построчно."""
@@ -927,17 +983,14 @@ class ParallelEditor(QMainWindow):
         self.statusBar().showMessage(f"Экспортировано: {path}", 5000)
 
     def _sync_paragraph(self, editor_idx: int, pos: int, do_scroll: bool = True) -> None:
-        """Подсветка конкретной строки и её пары; опционально выравнивание по Y.
-
-        Пара = та же строка по номеру (1↔1) на другой стороне.
+        """Подсветка строки и пары; выравнивание по Y.
+        Пара = тот же абзац по индексу (1↔1) на другой стороне.
         """
         source = self.editors[editor_idx]
         target = self.editors[1 - editor_idx]
-
         para_idx = source.get_paragraph_index(pos)
         if para_idx < 0:
             return
-
         target_pos = target.get_paragraph_position(para_idx)
         if target_pos is None:
             self.statusBar().showMessage(
@@ -945,38 +998,30 @@ class ParallelEditor(QMainWindow):
             )
             target.clear_line_highlight()
             return
-
-        # Y начала абзаца в source
         src_para_pos = source.get_paragraph_position(para_idx)
         source_cursor = source.textCursor()
         if src_para_pos is not None:
             source_cursor.setPosition(src_para_pos)
         source_rect = source.cursorRect(source_cursor)
         source_y = source_rect.top()
-
-        # Курсор в target на начало парного абзаца
         target._syncing = True
         target_cursor = QTextCursor(target.document())
-        target_cursor.setPosition(target_pos)  # без KeepAnchor — курсор, не выделение
+        target_cursor.setPosition(target_pos)
         target.setTextCursor(target_cursor)
-
-        # Только фон строки, без selection текста
         source.highlight_line_at(pos, QColor(200, 230, 255))
         target.highlight_line_at(target_pos, QColor(200, 245, 200))
-
         target_rect = target.cursorRect(target_cursor)
         target_y = target_rect.top()
-
-        # Прокрутка: diff в пикселях → единицы scrollbar (как в рабочем примере)
-        diff = source_y - target_y
-        if abs(diff) > 5:
-            line_height = target_rect.height() if target_rect.height() > 0 else 16
-            scrollbar = target.verticalScrollBar()
-            scroll_units = int(diff / line_height)
-            scrollbar.setValue(scrollbar.value() - scroll_units)
-
+        if do_scroll:
+            diff = source_y - target_y
+            if abs(diff) > 5:
+                line_height = target_rect.height() if target_rect.height() > 0 else 16
+                scrollbar = target.verticalScrollBar()
+                scroll_units = int(diff / line_height)
+                scrollbar.setValue(scrollbar.value() - scroll_units)
         target._syncing = False
         self.statusBar().showMessage(f"Абзац {para_idx + 1} выровнен", 2500)
+
 
     def _on_text_changed(self, side: str) -> None:
         if side == "en":
