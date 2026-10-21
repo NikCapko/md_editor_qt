@@ -18,10 +18,12 @@ from PySide6.QtCore import QPoint, QRect, QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QActionGroup,
     QDesktopServices,
     QFont,
     QKeySequence,
     QPainter,
+    QPalette,
     QSyntaxHighlighter,
     QTextCharFormat,
     QTextCursor,
@@ -77,13 +79,31 @@ class NumberBar(QWidget):
     def __init__(self, editor: "CodeEditor"):
         super().__init__(editor)
         self.editor = editor
-        self.setStyleSheet("background-color: #f0f0f0;")
+        self._theme = "light"
+        self._apply_theme()
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = theme
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        if self._theme == "dark":
+            self.setStyleSheet("background-color: #252526;")
+        else:
+            self.setStyleSheet("background-color: #f0f0f0;")
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(event.rect(), QColor("#f0f0f0"))
+        if self._theme == "dark":
+            bg = QColor("#252526")
+            fg = QColor("#858585")
+        else:
+            bg = QColor("#f0f0f0")
+            fg = QColor("#888888")
+        painter.fillRect(event.rect(), bg)
         painter.setFont(self.editor.font())
-        painter.setPen(QColor("#888"))
+        painter.setPen(fg)
 
         block = self.editor.firstVisibleBlock()
         offset = self.editor.contentOffset()
@@ -119,7 +139,6 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.heading_fmts = {}
         for level, delta in [(1, 8), (2, 6), (3, 4), (4, 2), (5, 1), (6, 0)]:
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#0066cc"))
             fmt.setFontWeight(QFont.Weight.Bold)
             fmt.setFontPointSize(base_pt + delta)
             self.heading_fmts[level] = fmt
@@ -135,15 +154,12 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.italic_fmt.setFontItalic(True)
 
         self.code_fmt = QTextCharFormat()
-        self.code_fmt.setForeground(QColor("#cc0000"))
         self.code_fmt.setFontFamily("Consolas")
 
         self.link_fmt = QTextCharFormat()
-        self.link_fmt.setForeground(QColor("#0066cc"))
         self.link_fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
 
         self.active_fmt = QTextCharFormat()
-        self.active_fmt.setBackground(QColor("#fffacd"))
 
         self.rules = [
             (re.compile(r"^#{1,6}\s.+$"), "heading"),
@@ -153,6 +169,32 @@ class MarkdownHighlighter(QSyntaxHighlighter):
             (re.compile(r"`([^`]+)`"), "code"),
             (re.compile(r"\[([^\]]+)\]\(([^)]+)\)"), "link"),
         ]
+        self._theme = "light"
+        self._apply_theme_colors()
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = theme
+        self._apply_theme_colors()
+        self.rehighlight()
+
+    def _apply_theme_colors(self) -> None:
+        if self._theme == "dark":
+            heading_color = QColor("#569cd6")
+            code_color = QColor("#ce9178")
+            link_color = QColor("#4ec9b0")
+            active_bg = QColor("#3a3d41")
+        else:
+            heading_color = QColor("#0066cc")
+            code_color = QColor("#cc0000")
+            link_color = QColor("#0066cc")
+            active_bg = QColor("#fffacd")
+
+        for level in self.heading_fmts:
+            self.heading_fmts[level].setForeground(heading_color)
+
+        self.code_fmt.setForeground(code_color)
+        self.link_fmt.setForeground(link_color)
+        self.active_fmt.setBackground(active_bg)
 
     def highlightBlock(self, text: str) -> None:
         is_active = (
@@ -229,25 +271,53 @@ class HeadingOutline(QListWidget):
         self.setMaximumWidth(260)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet(
-            """
-            QListWidget {
-                background: #fafafa;
-                border: 1px solid #e0e0e0;
-                font-size: 12px;
-                outline: none;
-            }
-            QListWidget::item {
-                padding: 3px 6px;
-                color: #333;
-            }
-            QListWidget::item:selected {
-                background: #1a73e8;
-                color: white;
-            }
-            """
-        )
+        self._theme = "light"
+        self._apply_theme()
         self.itemClicked.connect(self._on_item_clicked)
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = theme
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        if self._theme == "dark":
+            self.setStyleSheet(
+                """
+                QListWidget {
+                    background: #252526;
+                    border: 1px solid #3c3c3c;
+                    font-size: 12px;
+                    outline: none;
+                }
+                QListWidget::item {
+                    padding: 3px 6px;
+                    color: #cccccc;
+                }
+                QListWidget::item:selected {
+                    background: #094771;
+                    color: white;
+                }
+                """
+            )
+        else:
+            self.setStyleSheet(
+                """
+                QListWidget {
+                    background: #fafafa;
+                    border: 1px solid #e0e0e0;
+                    font-size: 12px;
+                    outline: none;
+                }
+                QListWidget::item {
+                    padding: 3px 6px;
+                    color: #333;
+                }
+                QListWidget::item:selected {
+                    background: #1a73e8;
+                    color: white;
+                }
+                """
+            )
 
     def rebuild(self, text: str) -> None:
         self._updating = True
@@ -316,6 +386,10 @@ class CodeEditor(QPlainTextEdit):
         self.blockCountChanged.connect(self._update_number_bar_width)
         self.updateRequest.connect(self._update_number_bar)
         self._update_number_bar_width()
+
+    def set_theme(self, theme: str) -> None:
+        self.number_bar.set_theme(theme)
+        self.highlighter.set_theme(theme)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1066,8 +1140,8 @@ class MetadataDialog(QDialog):
         self.title_edit = QLineEdit(title)
         form.addRow("Название:", self.title_edit)
 
-        #self.orig_name_edit = QLineEdit(str(data.get("orig_name") or ""))
-        #form.addRow("Оригинальное название:", self.orig_name_edit)
+        # self.orig_name_edit = QLineEdit(str(data.get("orig_name") or ""))
+        # form.addRow("Оригинальное название:", self.orig_name_edit)
 
         self.author_edit = QLineEdit(author)
         form.addRow("Автор:", self.author_edit)
@@ -1194,6 +1268,7 @@ class MarkdownEditor(QMainWindow):
         super().__init__()
         self.setWindowTitle("Markdown Editor")
         self.resize(1200, 800)
+        self._current_theme = "light"
 
         self._file_path: Path | None = None
         self._modified = False
@@ -1216,7 +1291,73 @@ class MarkdownEditor(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self._create_menu()
+
+        # Применяем сохранённую тему
+        saved_theme = QSettings().value("ui/theme", "light")
+        self.apply_theme(saved_theme)
+
         self.statusBar().showMessage("Готов")
+
+    def apply_theme(self, theme: str) -> None:
+        """Применяет светлую или тёмную тему ко всему приложению."""
+        app = QApplication.instance()
+        if theme == "dark":
+            app.setStyle("Fusion")
+            palette = QPalette()
+            palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+            palette.setColor(QPalette.ColorRole.WindowText, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(25, 25, 25))
+            palette.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.Text, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+            palette.setColor(QPalette.ColorRole.ButtonText, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+            palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.HighlightedText, QColor(35, 35, 35))
+            palette.setColor(
+                QPalette.ColorGroup.Disabled,
+                QPalette.ColorRole.Text,
+                QColor(128, 128, 128),
+            )
+            palette.setColor(
+                QPalette.ColorGroup.Disabled,
+                QPalette.ColorRole.ButtonText,
+                QColor(128, 128, 128),
+            )
+            palette.setColor(
+                QPalette.ColorGroup.Disabled,
+                QPalette.ColorRole.WindowText,
+                QColor(128, 128, 128),
+            )
+            app.setPalette(palette)
+            app.setStyleSheet(
+                """
+                QToolTip { color: #ffffff; background-color: #2b2b2b; border: 1px solid #555555; padding: 4px; }
+                QMenuBar { background-color: #353535; color: #ffffff; }
+                QMenuBar::item:selected { background-color: #505050; }
+                QMenu { background-color: #353535; color: #ffffff; border: 1px solid #555555; }
+                QMenu::item:selected { background-color: #2a82da; }
+                QStatusBar { background-color: #252526; color: #cccccc; }
+                """
+            )
+        else:
+            app.setStyle("Fusion")
+            app.setPalette(app.style().standardPalette())
+            app.setStyleSheet("")
+
+        # Обновляем кастомные виджеты
+        self.editor.set_theme(theme)
+        self.outline.set_theme(theme)
+
+        # Сохраняем выбор
+        QSettings().setValue("ui/theme", theme)
+        self._current_theme = theme
+
+        # Обновляем галочки в меню
+        self._update_theme_menu()
 
     def _create_menu(self):
         menubar = self.menuBar()
@@ -1270,12 +1411,35 @@ class MarkdownEditor(QMainWindow):
         replace_action.triggered.connect(self._show_find_replace)
         edit_menu.addAction(replace_action)
 
-        if _HAS_CORRECTOR:
-            edit_menu.addSeparator()
-            correct_action = QAction("Исправить текст…", self)
-            correct_action.setShortcut(QKeySequence("Ctrl+Alt+L"))
-            correct_action.triggered.connect(self._correct_text)
-            edit_menu.addAction(correct_action)
+        edit_menu.addSeparator()
+        correct_action = QAction("Исправить текст…", self)
+        correct_action.setShortcut(QKeySequence("Ctrl+Alt+L"))
+        correct_action.triggered.connect(self._correct_text)
+        edit_menu.addAction(correct_action)
+
+        # --- Меню "Вид" ---
+        view_menu = menubar.addMenu("&Вид")
+        theme_menu = view_menu.addMenu("Тема")
+
+        self._theme_light_action = QAction("Светлая", self)
+        self._theme_light_action.setCheckable(True)
+        self._theme_light_action.triggered.connect(lambda: self.apply_theme("light"))
+        theme_menu.addAction(self._theme_light_action)
+
+        self._theme_dark_action = QAction("Тёмная", self)
+        self._theme_dark_action.setCheckable(True)
+        self._theme_dark_action.triggered.connect(lambda: self.apply_theme("dark"))
+        theme_menu.addAction(self._theme_dark_action)
+
+        self._theme_group = QActionGroup(self)
+        self._theme_group.addAction(self._theme_light_action)
+        self._theme_group.addAction(self._theme_dark_action)
+        self._theme_group.setExclusive(True)
+
+    def _update_theme_menu(self) -> None:
+        """Синхронизирует галочки в меню с текущей темой."""
+        self._theme_light_action.setChecked(self._current_theme == "light")
+        self._theme_dark_action.setChecked(self._current_theme == "dark")
 
     def _correct_text(self) -> None:
         if not _HAS_CORRECTOR:
