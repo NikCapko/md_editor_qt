@@ -10,6 +10,7 @@ Parallel Markdown Editor
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -313,7 +314,7 @@ class CodeEditor(QPlainTextEdit):
         self.number_bar = NumberBar(self)
         self.highlighter = MarkdownHighlighter(self)
 
-        font = QFont("Consolas", 11)
+        font = QFont("Monospace", 10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
 
@@ -919,6 +920,229 @@ class FindReplaceDialog(QDialog):
             self.status.setStyleSheet("color: #c5221f;")
 
 
+DEFAULT_BNF = {
+    "title": "",
+    "orig_name": "",
+    "author": "",
+    "lang": "en-ru",
+    "tags": [],
+    "favorite": False,
+    "description": "",
+}
+
+TAG_HISTORY_PATH = Path.home() / ".bnf_tag_history.json"
+
+
+def _load_tag_history() -> list[str]:
+    """Загрузить историю тегов из ~/.bnf_tag_history.json."""
+    try:
+        if TAG_HISTORY_PATH.exists():
+            data = json.loads(TAG_HISTORY_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [str(t).strip() for t in data if str(t).strip()]
+    except Exception:
+        pass
+    return []
+
+
+def _save_tag_history(tags: list[str]) -> None:
+    """Сохранить уникальные теги в историю (сортировка по алфавиту)."""
+    existing = set(_load_tag_history())
+    for t in tags:
+        t = str(t).strip()
+        if t:
+            existing.add(t)
+    try:
+        TAG_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        sorted_tags = sorted(existing, key=lambda s: s.casefold())
+        TAG_HISTORY_PATH.write_text(
+            json.dumps(sorted_tags, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _parse_filename_title_author(base_name: str) -> tuple[str, str]:
+    """Из имени файла вида «Название [Автор]» извлечь title и author.
+
+    base_name — stem без .en.md / .ru.md / .bnf.
+    """
+    name = base_name.strip()
+    for suf in (".en.md", ".ru.md", ".md", ".bnf"):
+        if name.lower().endswith(suf):
+            name = name[: -len(suf)]
+    m = re.match(r"^(.+?)\s*\[([^\]]+)\]\s*$", name)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return name, ""
+
+
+class MetadataDialog(QDialog):
+    """Редактор метаданных книги (.bnf).
+
+    schema:
+      title, orig_name, author, lang (статично «en-ru»),
+      tags (list), favorite (bool), description
+    """
+
+    def __init__(
+        self,
+        parent,
+        data: dict | None = None,
+        path: str = "",
+        file_base_name: str = "",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Метаданные книги (.bnf)")
+        self.setMinimumWidth(640)
+        self.setMinimumHeight(520)
+
+        data = {**DEFAULT_BNF, **(data or {})}
+        tags_raw = data.get("tags") or []
+        if isinstance(tags_raw, str):
+            current_tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+        elif isinstance(tags_raw, list):
+            current_tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+        else:
+            current_tags = []
+
+        # предзаполнение title/author из имени файла, если поля пусты
+        title = str(data.get("title") or "").strip()
+        author = str(data.get("author") or "").strip()
+        if file_base_name and (not title or not author):
+            parsed_title, parsed_author = _parse_filename_title_author(file_base_name)
+            if not title and parsed_title:
+                title = parsed_title
+            if not author and parsed_author:
+                author = parsed_author
+
+        layout = QVBoxLayout(self)
+        if path:
+            layout.addWidget(QLabel(f"Файл: {path}"))
+
+        form = QFormLayout()
+
+        self.title_edit = QLineEdit(title)
+        form.addRow("Название:", self.title_edit)
+
+        self.orig_name_edit = QLineEdit(str(data.get("orig_name") or ""))
+        form.addRow("Оригинальное название:", self.orig_name_edit)
+
+        self.author_edit = QLineEdit(author)
+        form.addRow("Автор:", self.author_edit)
+
+        # lang — статично en-ru
+        self.lang_edit = QLineEdit("en-ru")
+        self.lang_edit.setReadOnly(True)
+        self.lang_edit.setStyleSheet("background: #f0f0f0; color: #555;")
+        self.lang_edit.setToolTip("Пока фиксированное значение en-ru")
+        form.addRow("Язык:", self.lang_edit)
+
+        self.favorite_cb = QCheckBox()
+        fav = data.get("favorite")
+        if isinstance(fav, str):
+            fav = fav.lower() in ("1", "true", "yes", "да")
+        self.favorite_cb.setChecked(bool(fav))
+        form.addRow("Избранное", self.favorite_cb)
+
+        # --- теги: история + чекбоксы + добавление ---
+        tags_box = QGroupBox("Теги")
+        tags_layout = QVBoxLayout(tags_box)
+
+        history = _load_tag_history()
+        all_known = sorted(
+            set(history) | set(current_tags),
+            key=lambda s: s.casefold(),
+        )
+
+        self.tags_list = QListWidget()
+        self.tags_list.setMinimumHeight(140)
+        for tag in all_known:
+            item = QListWidgetItem(tag)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+            )
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if tag in current_tags
+                else Qt.CheckState.Unchecked
+            )
+            self.tags_list.addItem(item)
+        tags_layout.addWidget(self.tags_list)
+
+        add_row = QHBoxLayout()
+        self.new_tag_edit = QLineEdit()
+        self.new_tag_edit.setPlaceholderText("Новый тег…")
+        self.new_tag_edit.returnPressed.connect(self._add_new_tag)
+        btn_add_tag = QPushButton("Добавить")
+        btn_add_tag.clicked.connect(self._add_new_tag)
+        add_row.addWidget(self.new_tag_edit, 1)
+        add_row.addWidget(btn_add_tag)
+        tags_layout.addLayout(add_row)
+
+        form.addRow(tags_box)
+
+        self.description_edit = QTextEdit()
+        self.description_edit.setPlainText(str(data.get("description") or ""))
+        self.description_edit.setMaximumHeight(120)
+        form.addRow("Описание:", self.description_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _add_new_tag(self) -> None:
+        text = self.new_tag_edit.text().strip()
+        if not text:
+            return
+        for i in range(self.tags_list.count()):
+            if self.tags_list.item(i).text().casefold() == text.casefold():
+                self.tags_list.item(i).setCheckState(Qt.CheckState.Checked)
+                self.new_tag_edit.clear()
+                return
+        item = QListWidgetItem(text)
+        item.setFlags(
+            item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+        )
+        item.setCheckState(Qt.CheckState.Checked)
+        self.tags_list.addItem(item)
+        self.new_tag_edit.clear()
+
+    def result_data(self) -> dict:
+        selected_tags: list[str] = []
+        for i in range(self.tags_list.count()):
+            item = self.tags_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                t = item.text().strip()
+                if t:
+                    selected_tags.append(t)
+        all_tags = [
+            self.tags_list.item(i).text().strip()
+            for i in range(self.tags_list.count())
+            if self.tags_list.item(i).text().strip()
+        ]
+        _save_tag_history(all_tags)
+
+        return {
+            "title": self.title_edit.text().strip(),
+            "orig_name": self.orig_name_edit.text().strip(),
+            "author": self.author_edit.text().strip(),
+            "lang": "en-ru",
+            "tags": selected_tags,
+            "favorite": self.favorite_cb.isChecked(),
+            "description": self.description_edit.toPlainText().strip(),
+        }
+
+
 class ParallelEditor(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1002,7 +1226,12 @@ class ParallelEditor(QMainWindow):
         file_menu.addAction(save_as_action)
 
         file_menu.addSeparator()
+        meta_action = QAction("Метаданные книги (.bnf)…", self)
+        meta_action.setShortcut(QKeySequence("Ctrl+M"))
+        meta_action.triggered.connect(self._edit_metadata)
+        file_menu.addAction(meta_action)
 
+        file_menu.addSeparator()
         export_pdf_action = QAction("Экспорт в PDF…", self)
         export_pdf_action.triggered.connect(lambda: self._export("pdf"))
         file_menu.addAction(export_pdf_action)
@@ -1503,6 +1732,77 @@ class ParallelEditor(QMainWindow):
             base = file_path
         self.current_file_base = base
         self._save_files()
+
+    def _bnf_path(self) -> Path | None:
+        """book.en.md / book.ru.md → book.bnf"""
+        if self.current_file_base:
+            base = str(self.current_file_base)
+            # base уже без .en.md/.ru.md
+            return Path(base + ".bnf")
+        if self._en_path:
+            p = self._en_path
+            name = p.name
+            if name.endswith(".en.md"):
+                return p.with_name(name[:-6] + ".bnf")
+            return p.with_suffix(".bnf")
+        return None
+
+    def _load_bnf(self) -> dict:
+        path = self._bnf_path()
+        if path is None or not path.exists():
+            return dict(DEFAULT_BNF)
+        try:
+            return {**DEFAULT_BNF, **json.loads(path.read_text(encoding="utf-8"))}
+        except Exception:
+            return dict(DEFAULT_BNF)
+
+    def _save_bnf(self, data: dict) -> bool:
+        path = self._bnf_path()
+        print("save to file" + str(path))
+        if path is None:
+            QMessageBox.warning(
+                self,
+                "Метаданные",
+                "Сначала откройте или сохраните пару .en.md / .ru.md.",
+            )
+            return False
+        try:
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self.statusBar().showMessage(f"Метаданные: {path}", 4000)
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить .bnf:\n{e}")
+            return False
+
+    def _edit_metadata(self) -> None:
+        path = self._bnf_path()
+        data = self._load_bnf()
+        # имя файла для предзаполнения title/author: «Название [Автор]»
+        file_base_name = ""
+        if self.current_file_base:
+            file_base_name = Path(str(self.current_file_base)).name
+        elif self._en_path:
+            name = self._en_path.name
+            if name.endswith(".en.md"):
+                file_base_name = name[:-6]
+            else:
+                file_base_name = self._en_path.stem
+        self.dlg = MetadataDialog(
+            self,
+            data=data,
+            path=str(path) if path else "",
+            file_base_name=file_base_name,
+        )
+        self.dlg.finished.connect(self._on_dialog_finished)
+        self.dlg.show()
+
+    def _on_dialog_finished(self, result: int):
+        if result != QDialog.DialogCode.Accepted:
+            return
+        self._save_bnf(self.dlg.result_data())
 
     def _update_title(self) -> None:
         parts = []
