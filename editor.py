@@ -17,12 +17,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from export_parallel import export_file
-
-from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtCore import QRect, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QDesktopServices,
     QFont,
     QKeySequence,
     QPainter,
@@ -32,9 +31,8 @@ from PySide6.QtGui import (
     QTextFormat,
 )
 from PySide6.QtWidgets import (
-    QButtonGroup,
-    QRadioButton,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -45,19 +43,22 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QSizePolicy,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
+    QSizePolicy,
     QStatusBar,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from export_parallel import export_file
 
 
 class NumberBar(QWidget):
@@ -84,7 +85,10 @@ class NumberBar(QWidget):
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and top + line_height >= event.rect().top():
                 painter.drawText(
-                    0, top, self.width() - 4, line_height,
+                    0,
+                    top,
+                    self.width() - 4,
+                    line_height,
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     str(block_number),
                 )
@@ -169,7 +173,6 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                 i = j
             else:
                 i += 1
-
 
 
 class HeadingOutline(QListWidget):
@@ -307,7 +310,6 @@ class CodeEditor(QPlainTextEdit):
             self.number_bar.update(0, rect.y(), self.number_bar.width(), rect.height())
         if rect.contains(self.viewport().rect()):
             self._update_number_bar_width()
-
 
     def _on_cursor_changed(self):
         cursor = self.textCursor()
@@ -492,7 +494,6 @@ class CodeEditor(QPlainTextEdit):
         return info["para_idx"]
 
 
-
 class FindReplaceDialog(QDialog):
     """Поиск и замена: regex, учёт регистра, сторона (лево/право/оба)."""
 
@@ -523,7 +524,9 @@ class FindReplaceDialog(QDialog):
         self.case_cb = QCheckBox("Учитывать регистр")
         self.case_cb.setToolTip("Если включено — Hello и hello считаются разными")
         self.regex_cb = QCheckBox("Регулярное выражение")
-        self.regex_cb.setToolTip("Синтаксис Python re; в замене доступны \\1, \\g<name>")
+        self.regex_cb.setToolTip(
+            "Синтаксис Python re; в замене доступны \\1, \\g<name>"
+        )
         opts.addWidget(self.case_cb)
         opts.addWidget(self.regex_cb)
         opts.addStretch()
@@ -622,7 +625,9 @@ class FindReplaceDialog(QDialog):
         editor.centerCursor()
         editor.setFocus()
 
-    def _highlight_all_in_editors(self, pat, current_editor=None, current_span=None) -> None:
+    def _highlight_all_in_editors(
+        self, pat, current_editor=None, current_span=None
+    ) -> None:
         """Подсветить все совпадения во всех целевых редакторах."""
         if pat is None:
             return
@@ -661,7 +666,9 @@ class FindReplaceDialog(QDialog):
             cursor = editor.textCursor()
             if forward:
                 start_at = (
-                    cursor.selectionEnd() if cursor.hasSelection() else cursor.position()
+                    cursor.selectionEnd()
+                    if cursor.hasSelection()
+                    else cursor.position()
                 )
                 if self._last_editor is not editor and len(editors) > 1:
                     start_at = 0
@@ -838,9 +845,7 @@ class ParallelEditor(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self._create_menu()
-        self.statusBar().showMessage(
-            "Клик по строке — подсветка пары и выравнивание"
-        )
+        self.statusBar().showMessage("Клик по строке — подсветка пары и выравнивание")
 
     def _create_menu(self):
         menubar = self.menuBar()
@@ -929,7 +934,6 @@ class ParallelEditor(QMainWindow):
         dlg.raise_()
         dlg.activateWindow()
 
-
     def _ensure_en_file(self) -> Path | None:
         """Сохраняет текущий оригинал в .en.md и возвращает путь."""
         en_text = self.left_editor.toPlainText()
@@ -943,7 +947,9 @@ class ParallelEditor(QMainWindow):
                 self._en_modified = False
                 return self._en_path
             except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить .en.md:\n{e}")
+                QMessageBox.critical(
+                    self, "Ошибка", f"Не удалось сохранить .en.md:\n{e}"
+                )
                 return None
 
         if self.current_file_base:
@@ -964,7 +970,9 @@ class ParallelEditor(QMainWindow):
             p.write_text(en_text, encoding="utf-8")
             return p
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось создать временный файл:\n{e}")
+            QMessageBox.critical(
+                self, "Ошибка", f"Не удалось создать временный файл:\n{e}"
+            )
             return None
 
     def _find_browser(self, service: str) -> str | None:
@@ -1023,10 +1031,7 @@ class ParallelEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось запустить {label}:\n{e}")
             return
-        self.statusBar().showMessage(
-            f"Открыто в {label}: {en_path.name}", 5000
-        )
-
+        self.statusBar().showMessage(f"Открыто в {label}: {en_path.name}", 5000)
 
     def _export(self, fmt: str) -> None:
         """Экспорт в PDF или EPUB: таблица или построчно."""
@@ -1041,6 +1046,10 @@ class ParallelEditor(QMainWindow):
         layout.addWidget(radio_table)
         layout.addWidget(radio_line)
 
+        open_after = QCheckBox("Открыть после сохранения")
+        open_after.setChecked(True)
+        layout.addWidget(open_after)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1052,6 +1061,7 @@ class ParallelEditor(QMainWindow):
             return
 
         layout_mode = "table" if radio_table.isChecked() else "interlinear"
+        should_open = open_after.isChecked()
 
         if fmt == "pdf":
             filt = "PDF (*.pdf)"
@@ -1090,7 +1100,26 @@ class ParallelEditor(QMainWindow):
 
         self.statusBar().showMessage(f"Экспортировано: {path}", 5000)
 
-    def _sync_paragraph(self, editor_idx: int, pos: int, do_scroll: bool = True) -> None:
+        if should_open:
+            url = QUrl.fromLocalFile(str(Path(path).resolve()))
+            if not QDesktopServices.openUrl(url):
+                try:
+                    subprocess.Popen(
+                        ["xdg-open", path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        "Экспорт",
+                        f"Файл сохранён, но не удалось открыть:\n{e}",
+                    )
+
+    def _sync_paragraph(
+        self, editor_idx: int, pos: int, do_scroll: bool = True
+    ) -> None:
         """Подсветка строки и пары; выравнивание по Y.
         Пара = тот же абзац по индексу (1↔1) на другой стороне.
         """
@@ -1130,7 +1159,6 @@ class ParallelEditor(QMainWindow):
         target._syncing = False
         self.statusBar().showMessage(f"Абзац {para_idx + 1} выровнен", 2500)
 
-
     def _on_text_changed(self, side: str) -> None:
         if side == "en":
             if self.left_editor._syncing:
@@ -1150,7 +1178,9 @@ class ParallelEditor(QMainWindow):
             self._update_active_heading(self.right_editor, self.right_outline)
         self._update_title()
 
-    def _update_active_heading(self, editor: CodeEditor, outline: HeadingOutline) -> None:
+    def _update_active_heading(
+        self, editor: CodeEditor, outline: HeadingOutline
+    ) -> None:
         pos = editor.textCursor().position()
         outline.highlight_for_position(pos)
 
