@@ -188,8 +188,8 @@ class HeadingOutline(QListWidget):
         self._side = side  # left | right — только для стиля
         self._headings: list[tuple[int, int, str]] = []  # (pos, level, title)
         self._updating = False
-        self.setMinimumWidth(140)
-        self.setMaximumWidth(260)
+        self.setMinimumWidth(200)
+        self.setMaximumWidth(200)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         accent = "#1a73e8" if side == "left" else "#188038"
@@ -226,8 +226,8 @@ class HeadingOutline(QListWidget):
             title = re.sub(r"`([^`]+)`", r"\1", title)
             pos = m.start()
             self._headings.append((pos, level, title))
-            indent = "  " * (level - 1)
-            item = QListWidgetItem(f"{indent}{'#' * level} {title}")
+            indent = "    " * (level - 2)
+            item = QListWidgetItem(f"{indent}{title}")
             item.setData(Qt.ItemDataRole.UserRole, pos)
             item.setToolTip(title)
             self.addItem(item)
@@ -890,7 +890,7 @@ class ParallelEditor(QMainWindow):
         edit_menu.addAction(find_action)
 
         replace_action = QAction("Заменить…", self)
-        replace_action.setShortcut(QKeySequence.StandardKey.Replace)
+        replace_action.setShortcut(QKeySequence("Ctrl+R"))
         replace_action.triggered.connect(self._show_find_replace)
         edit_menu.addAction(replace_action)
 
