@@ -181,7 +181,8 @@ class HeadingOutline(QListWidget):
 
     heading_activated = Signal(int)  # position в документе
 
-    _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+    _ATX_HEADING_RE  = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+    _BOLD_HEADING_RE = re.compile(r"^(?<!\*)\*\*(?!\*)(?P<bold_text>.+?)(?<!\*)\*\*(?!\*)$", re.MULTILINE)
 
     def __init__(self, side: str = "left", parent=None):
         super().__init__(parent)
@@ -218,13 +219,18 @@ class HeadingOutline(QListWidget):
         self._updating = True
         self.clear()
         self._headings = []
-        for m in self._HEADING_RE.finditer(text):
-            level = len(m.group(1))
-            title = m.group(2).strip()
+
+        def _iter_headings(text):
+            for m in self._ATX_HEADING_RE.finditer(text):
+                yield m.start(), len(m.group(1)), m.group(2)
+            for m in self._BOLD_HEADING_RE.finditer(text):
+                yield m.start(), 4, m.group(1)   # уровень для ** — на твой вкус
+
+        for pos, level, title in sorted(_iter_headings(text), key=lambda t: t[0]):
+            title = title.strip()
             # убрать простой markdown из заголовка
             title = re.sub(r"\*\*(.+?)\*\*", r"\1", title)
             title = re.sub(r"`([^`]+)`", r"\1", title)
-            pos = m.start()
             self._headings.append((pos, level, title))
             indent = "    " * (level - 2)
             item = QListWidgetItem(f"{indent}{title}")
