@@ -18,6 +18,7 @@ from xml.sax.saxutils import escape as xml_escape
 # Абзацы
 # ---------------------------------------------------------------------------
 
+
 def split_paragraphs(text: str) -> list[str]:
     """Делит текст на абзацы по пустым строкам."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -62,11 +63,12 @@ def strip_md_light(text: str) -> str:
 # PDF (reportlab)
 # ---------------------------------------------------------------------------
 
+
 def _find_font() -> tuple[str, str]:
     """Возвращает (regular, bold) пути к TTF с кириллицей."""
     candidates = [
         (
-           "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
         ),
         (
@@ -95,20 +97,20 @@ def export_pdf(
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.platypus import (
+        KeepTogether,
         Paragraph,
         SimpleDocTemplate,
         Spacer,
         Table,
         TableStyle,
-        KeepTogether,
     )
 
     path = Path(path)
     pairs = pair_paragraphs(en_text, ru_text)
 
     reg, bold = _find_font()
-    font_name = "Helvetica"
-    font_bold = "Helvetica-Bold"
+    font_name = "DejaVu"
+    font_bold = "DejaVu-Bold"
     if reg:
         pdfmetrics.registerFont(TTFont("DejaVu", reg))
         pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
@@ -165,10 +167,10 @@ def export_pdf(
     doc = SimpleDocTemplate(
         str(path),
         pagesize=A4,
-        leftMargin=15 * mm,
-        rightMargin=15 * mm,
-        topMargin=15 * mm,
-        bottomMargin=15 * mm,
+        leftMargin=0,
+        rightMargin=0,
+        topMargin=0,
+        bottomMargin=0,
         title=title,
     )
     story = [Paragraph(html.escape(title), title_style), Spacer(1, 6)]
@@ -183,25 +185,17 @@ def export_pdf(
         for en, ru in pairs:
             data.append([p(en, cell_style), p(ru, cell_style)])
 
-        col_w = (A4[0] - 30 * mm) / 2
-        table = Table(data, colWidths=[col_w, col_w], repeatRows=1)
+        table = Table(data, colWidths=[270, 270])
         table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eaed")),
-                    ("FONTNAME", (0, 0), (-1, 0), font_bold),
+                    ("FONTNAME", (0, 0), (-1, -1), "DejaVu"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#bdc1c6")),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                    (
-                        "ROWBACKGROUNDS",
-                        (0, 1),
-                        (-1, -1),
-                        [colors.white, colors.HexColor("#f8f9fa")],
-                    ),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
                 ]
             )
         )
@@ -221,6 +215,7 @@ def export_pdf(
 # ---------------------------------------------------------------------------
 # EPUB (zip + XHTML, без внешних зависимостей)
 # ---------------------------------------------------------------------------
+
 
 def _xhtml_escape(text: str) -> str:
     return xml_escape(strip_md_light(text)).replace("\n", "<br/>")
@@ -250,9 +245,7 @@ def export_epub(
             f"<h1>{xml_escape(title)}</h1>\n"
             "<table>\n"
             "<thead><tr><th>Original</th><th>Translation</th></tr></thead>\n"
-            "<tbody>\n"
-            + "\n".join(rows)
-            + "\n</tbody></table>"
+            "<tbody>\n" + "\n".join(rows) + "\n</tbody></table>"
         )
         css = """
 table { width: 100%; border-collapse: collapse; }
@@ -335,7 +328,9 @@ h1 { font-size: 1.4em; }
 
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # mimetype must be first and uncompressed
-        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr(
+            "mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED
+        )
         zf.writestr("META-INF/container.xml", container)
         zf.writestr("OEBPS/content.opf", content_opf)
         zf.writestr("OEBPS/nav.xhtml", nav)
