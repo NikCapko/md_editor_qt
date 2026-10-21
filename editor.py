@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,8 +16,8 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QRect, QSettings, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
-    QColor,
     QActionGroup,
+    QColor,
     QDesktopServices,
     QFont,
     QKeySequence,
@@ -27,7 +26,6 @@ from PySide6.QtGui import (
     QSyntaxHighlighter,
     QTextCharFormat,
     QTextCursor,
-    QTextFormat,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -49,13 +47,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QSizePolicy,
     QStatusBar,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from collapsible_widget import CollapsibleWidget
 
 # Опциональные импорты — если модулей нет, соответствующие функции отключатся.
 try:
@@ -1280,9 +1279,19 @@ class MarkdownEditor(QMainWindow):
         root.setSpacing(2)
 
         self.outline = HeadingOutline()
+        self.collapsible = CollapsibleWidget(
+            "Оглавление",
+            settings_key="outline",
+            orientation="vertical",
+        )
+        self.collapsible.add_widget(self.outline)
+        # Фиксируем ширину контейнера — как у самого Outline
+        self.collapsible.setMinimumWidth(0)
+        self.collapsible.setMaximumWidth(200)
+
         self.editor = CodeEditor()
 
-        root.addWidget(self.outline, 0)
+        root.addWidget(self.collapsible, 0)
         root.addWidget(self.editor, 1)
 
         self.editor.textChanged.connect(self._on_text_changed)
@@ -1349,6 +1358,7 @@ class MarkdownEditor(QMainWindow):
             app.setStyleSheet("")
 
         # Обновляем кастомные виджеты
+        self.collapsible.set_theme(theme)
         self.editor.set_theme(theme)
         self.outline.set_theme(theme)
 
