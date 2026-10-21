@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
 )
 
 from export_parallel import export_file
+from text_corrector import normalize_text
 
 
 class NumberBar(QWidget):
@@ -893,16 +894,82 @@ class ParallelEditor(QMainWindow):
         replace_action.triggered.connect(self._show_find_replace)
         edit_menu.addAction(replace_action)
 
+        edit_menu.addSeparator()
+        correct_action = QAction("Исправить текст (обе панели)…", self)
+        correct_action.setShortcut(QKeySequence("Ctrl+Alt+L"))
+        correct_action.triggered.connect(self._correct_all_text)
+        edit_menu.addAction(correct_action)
+
         tr_menu = menubar.addMenu("&Перевод")
-        google_action = QAction("Открыть в Google Chrome (Google Translate)…", self)
+        google_action = QAction("Открыть в Google Chrome…", self)
         google_action.triggered.connect(lambda: self._open_in_translator("google"))
         tr_menu.addAction(google_action)
 
-        yandex_action = QAction("Открыть в Yandex Browser (Yandex Translate)…", self)
+        yandex_action = QAction("Открыть в Yandex Browser…", self)
         yandex_action.triggered.connect(lambda: self._open_in_translator("yandex"))
         tr_menu.addAction(yandex_action)
 
+    def _correct_all_text(self) -> None:
+        """Применить нормализацию ко всему тексту обеих панелей."""
+        reply = QMessageBox.question(
+            self,
+            "Исправить текст",
+            "Применить правила корректировки ко всему тексту\nоригинала и перевода?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        en_path = self._en_path or (
+            Path(str(self.current_file_base) + ".en.md")
+            if self.current_file_base
+            else Path("document.en.md")
+        )
+        ru_path = self._ru_path or (
+            Path(str(self.current_file_base) + ".ru.md")
+            if self.current_file_base
+            else Path("document.ru.md")
+        )
+
+        en_text = self.left_editor.toPlainText()
+        ru_text = self.right_editor.toPlainText()
+        new_en = normalize_text(en_text, en_path)
+        new_ru = normalize_text(ru_text, ru_path)
+
+        self.left_editor._syncing = True
+        self.right_editor._syncing = True
+        try:
+            en_pos = self.left_editor.textCursor().position()
+            ru_pos = self.right_editor.textCursor().position()
+            self.left_editor.setPlainText(new_en)
+            self.right_editor.setPlainText(new_ru)
+            for editor, pos, txt in (
+                (self.left_editor, en_pos, new_en),
+                (self.right_editor, ru_pos, new_ru),
+            ):
+                c = editor.textCursor()
+                c.setPosition(min(pos, max(0, len(txt) - 1)))
+                editor.setTextCursor(c)
+        finally:
+            self.left_editor._syncing = False
+            self.right_editor._syncing = False
+
+        self._en_modified = True
+        self._ru_modified = True
+        if self._en_path:
+            self.lbl_en.setText(f"Оригинал — {self._en_path.name} *")
+        if self._ru_path:
+            self.lbl_ru.setText(f"Перевод — {self._ru_path.name} *")
+        if hasattr(self, "left_outline"):
+            self.left_outline.rebuild(new_en)
+            self.right_outline.rebuild(new_ru)
+            self._update_active_heading(self.left_editor, self.left_outline)
+            self._update_active_heading(self.right_editor, self.right_outline)
+        self._update_title()
+        self.statusBar().showMessage("Текст исправлен (обе панели)", 4000)
+
     def _show_find(self) -> None:
+
         self._open_find_dialog(replace_mode=False)
 
     def _show_find_replace(self) -> None:
