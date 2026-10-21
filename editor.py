@@ -314,7 +314,7 @@ class CodeEditor(QPlainTextEdit):
         self.number_bar = NumberBar(self)
         self.highlighter = MarkdownHighlighter(self)
 
-        font = QFont("Monospace", 10)
+        font = QFont("Consolas", 11)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
 
@@ -434,9 +434,9 @@ class CodeEditor(QPlainTextEdit):
 
         # --- bold / italic / bold_italic ---
         markers = {
+            "bold_italic": "***",
             "bold": "**",
             "italic": "*",
-            "bold_italic": "***",
         }
         if kind not in markers:
             return
@@ -1575,8 +1575,8 @@ class ParallelEditor(QMainWindow):
         target_cursor = QTextCursor(target.document())
         target_cursor.setPosition(target_pos)
         target.setTextCursor(target_cursor)
-        source.highlight_line_at(pos, QColor(200, 230, 255))
-        target.highlight_line_at(target_pos, QColor(200, 245, 200))
+        #source.highlight_line_at(pos, QColor(200, 230, 255))
+        #target.highlight_line_at(target_pos, QColor(200, 245, 200))
         target_rect = target.cursorRect(target_cursor)
         target_y = target_rect.top()
         if do_scroll:
@@ -1621,6 +1621,8 @@ class ParallelEditor(QMainWindow):
         editor.setTextCursor(cursor)
         editor.centerCursor()
         editor.setFocus()
+        self._sync_paragraph(editor.editor_idx, pos, True)
+        self._sync_paragraph(editor.editor_idx, pos, True)
 
     def _open_files(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
