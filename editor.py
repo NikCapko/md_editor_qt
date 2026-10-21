@@ -11,7 +11,10 @@ Parallel Markdown Editor
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from export_parallel import export_file
@@ -714,6 +717,15 @@ class ParallelEditor(QMainWindow):
         replace_action.triggered.connect(self._show_find_replace)
         edit_menu.addAction(replace_action)
 
+        tr_menu = menubar.addMenu("&Перевод")
+        google_action = QAction("Открыть в Google Chrome (Google Translate)…", self)
+        google_action.triggered.connect(lambda: self._open_in_translator("google"))
+        tr_menu.addAction(google_action)
+
+        yandex_action = QAction("Открыть в Yandex Browser (Yandex Translate)…", self)
+        yandex_action.triggered.connect(lambda: self._open_in_translator("yandex"))
+        tr_menu.addAction(yandex_action)
+
     def _show_find(self) -> None:
         self._open_find_dialog(replace_mode=False)
 
@@ -746,6 +758,111 @@ class ParallelEditor(QMainWindow):
         dlg.raise_()
         dlg.activateWindow()
 
+
+    def _ensure_en_file(self) -> Path | None:
+        """Сохраняет текущий оригинал в .en.md и возвращает путь."""
+        en_text = self.left_editor.toPlainText()
+        if not en_text.strip():
+            QMessageBox.warning(self, "Перевод", "Оригинал (.en.md) пуст.")
+            return None
+
+        if self._en_path is not None:
+            try:
+                self._en_path.write_text(en_text, encoding="utf-8")
+                self._en_modified = False
+                return self._en_path
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить .en.md:\n{e}")
+                return None
+
+        if self.current_file_base:
+            p = Path(str(self.current_file_base) + ".en.md")
+            try:
+                p.write_text(en_text, encoding="utf-8")
+                self._en_path = p
+                return p
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+                return None
+
+        # временный файл
+        try:
+            td = Path(tempfile.gettempdir()) / "parallel_editor"
+            td.mkdir(parents=True, exist_ok=True)
+            p = td / "original.en.md"
+            p.write_text(en_text, encoding="utf-8")
+            return p
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать временный файл:\n{e}")
+            return None
+
+    def _find_browser(self, service: str) -> str | None:
+        """Путь к браузеру: google → google-chrome-stable; yandex → yandex-browser-stable."""
+        if service == "google":
+            candidates = [
+                "google-chrome-stable",
+                "google-chrome",
+                "chromium-browser",
+                "chromium",
+            ]
+        else:
+            candidates = [
+                "yandex-browser-stable",
+                "yandex-browser",
+            ]
+        for name in candidates:
+            path = shutil.which(name)
+            if path:
+                return path
+        return None
+
+    def _open_in_translator(self, service: str) -> None:
+        """Открывает .en.md в Chrome (Google) или Yandex Browser.
+
+        service: "google" | "yandex"
+        """
+        en_path = self._ensure_en_file()
+        if en_path is None:
+            return
+
+        browser = self._find_browser(service)
+        if browser is None:
+            if service == "google":
+                msg = (
+                    "Не найден google-chrome-stable (или google-chrome / chromium).\n"
+                    "Установите Google Chrome."
+                )
+            else:
+                msg = (
+                    "Не найден yandex-browser-stable (или yandex-browser).\n"
+                    "Установите Yandex Browser."
+                )
+            QMessageBox.warning(self, "Перевод", msg)
+            return
+
+        file_url = en_path.resolve().as_uri()  # file:///...
+
+        # Страница переводчика + файл оригинала
+        if service == "google":
+            label = "Google Chrome"
+        else:
+            label = "Yandex Browser"
+
+        try:
+            # файл .en.md и страница переводчика
+            subprocess.Popen(
+                [browser, file_url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось запустить {label}:\n{e}")
+            return
+
+        self.statusBar().showMessage(
+            f"Открыто в {label}: {en_path.name} + переводчик", 5000
+        )
 
     def _export(self, fmt: str) -> None:
         """Экспорт в PDF или EPUB: таблица или построчно."""
