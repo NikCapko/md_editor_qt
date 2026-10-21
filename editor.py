@@ -816,11 +816,11 @@ class MarkdownEditor(QMainWindow):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(2)
 
-        self.editor = CodeEditor()
         self.outline = HeadingOutline()
+        self.editor = CodeEditor()
 
-        root.addWidget(self.editor, 1)
         root.addWidget(self.outline, 0)
+        root.addWidget(self.editor, 1)
 
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.cursorPositionChanged.connect(self._update_active_heading)
