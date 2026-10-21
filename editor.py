@@ -529,11 +529,7 @@ class CodeEditor(QPlainTextEdit):
         self.setExtraSelections([])
 
     def get_line_info(self, pos: int) -> dict | None:
-        """Информация о строке в позиции pos.
-
-        Для непустой строки: абзац (группы непустых строк подряд) + смещение внутри него.
-        Для пустой: is_empty=True, привязка 1:1 по номеру строки.
-        """
+        """Каждая строка (блок) = отдельный абзац. Пустая строка тоже абзац."""
         block = self.document().findBlock(pos)
         if not block.isValid():
             return None
@@ -541,79 +537,21 @@ class CodeEditor(QPlainTextEdit):
         line_no = block.blockNumber()
         is_empty = not block.text().strip()
 
-        if is_empty:
-            return {
-                "line_no": line_no,
-                "is_empty": True,
-                "para_idx": -1,
-                "offset": 0,
-                "para_start_line": line_no,
-                "para_end_line": line_no + 1,
-                "position": block.position(),
-            }
-
-        # начало абзаца: назад по непустым
-        start = block
-        while start.previous().isValid() and start.previous().text().strip():
-            start = start.previous()
-        # конец абзаца
-        end = block
-        while end.next().isValid() and end.next().text().strip():
-            end = end.next()
-
-        para_start_line = start.blockNumber()
-        para_end_line = end.blockNumber() + 1
-        offset = line_no - para_start_line
-
-        # индекс абзаца среди непустых групп
-        idx = 0
-        b = self.document().begin()
-        in_para = False
-        while b.isValid():
-            if b.text().strip():
-                if not in_para:
-                    in_para = True
-                    if b == start:
-                        break
-                    idx += 1
-            else:
-                in_para = False
-            b = b.next()
-
         return {
             "line_no": line_no,
-            "is_empty": False,
-            "para_idx": idx,
-            "offset": offset,
-            "para_start_line": para_start_line,
-            "para_end_line": para_end_line,
+            "is_empty": is_empty,
+            "para_idx": line_no,          # индекс абзаца = номер строки
+            "offset": 0,
+            "para_start_line": line_no,
+            "para_end_line": line_no + 1, # ровно одна строка
             "position": block.position(),
         }
 
     def get_paragraph_range(self, para_idx: int) -> tuple[int, int] | None:
-        """(start_line, end_line exclusive) для абзаца para_idx, или None."""
-        count = 0
-        b = self.document().begin()
-        in_para = False
-        start_line = None
-        while b.isValid():
-            if b.text().strip():
-                if not in_para:
-                    in_para = True
-                    if count == para_idx:
-                        start_line = b.blockNumber()
-                    count += 1
-                if start_line is not None and count > para_idx + 1:
-                    # следующий абзац начался — но count уже увеличен на следующем
-                    pass
-            else:
-                if in_para and start_line is not None and count == para_idx + 1:
-                    return (start_line, b.blockNumber())
-                in_para = False
-            b = b.next()
-        if start_line is not None:
-            return (start_line, self.blockCount())
-        return None
+        """(start_line, end_line exclusive) — ровно одна строка."""
+        if para_idx < 0 or para_idx >= self.blockCount():
+            return None
+        return (para_idx, para_idx + 1)
 
     def get_paragraph_position(self, idx: int):
         """Позиция начала абзаца idx (для совместимости)."""
@@ -624,10 +562,10 @@ class CodeEditor(QPlainTextEdit):
         return block.position() if block.isValid() else None
 
     def get_paragraph_index(self, pos: int) -> int:
-        info = self.get_line_info(pos)
-        if info is None or info["is_empty"]:
+        block = self.document().findBlock(pos)
+        if not block.isValid():
             return -1
-        return info["para_idx"]
+        return block.blockNumber()
 
 
 class FindReplaceDialog(QDialog):
@@ -1561,7 +1499,7 @@ class ParallelEditor(QMainWindow):
         target_pos = target.get_paragraph_position(para_idx)
         if target_pos is None:
             self.statusBar().showMessage(
-                f"Абзац {para_idx + 1}: нет пары на другой стороне", 3000
+                f"Строка {para_idx + 1}: нет пары на другой стороне"
             )
             target.clear_line_highlight()
             return
@@ -1587,7 +1525,7 @@ class ParallelEditor(QMainWindow):
                 scroll_units = int(diff / line_height)
                 scrollbar.setValue(scrollbar.value() - scroll_units)
         target._syncing = False
-        self.statusBar().showMessage(f"Абзац {para_idx + 1} выровнен", 2500)
+        self.statusBar().showMessage(f"Строка {para_idx + 1} выровнена", 2500)
 
     def _on_text_changed(self, side: str) -> None:
         if side == "en":
