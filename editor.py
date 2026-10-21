@@ -106,9 +106,18 @@ class MarkdownHighlighter(QSyntaxHighlighter):
         self.editor = editor
         self.prev_block_number = -1
 
-        self.heading_fmt = QTextCharFormat()
-        self.heading_fmt.setForeground(QColor("#0066cc"))
-        self.heading_fmt.setFontWeight(QFont.Weight.Bold)
+        base_pt = self.editor.font().pointSize() or 11
+        self.heading_fmts = {}
+        for level, delta in [(1, 8), (2, 6), (3, 4), (4, 2), (5, 1), (6, 0)]:
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor("#0066cc"))
+            fmt.setFontWeight(QFont.Weight.Bold)
+            fmt.setFontPointSize(base_pt + delta)
+            self.heading_fmts[level] = fmt
+
+        self.bold_italic_fmt = QTextCharFormat()
+        self.bold_italic_fmt.setFontWeight(QFont.Weight.Bold)
+        self.bold_italic_fmt.setFontItalic(True)
 
         self.bold_fmt = QTextCharFormat()
         self.bold_fmt.setFontWeight(QFont.Weight.Bold)
@@ -129,10 +138,11 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         self.rules = [
             (re.compile(r"^#{1,6}\s.+$"), "heading"),
+            (re.compile(r"\*\*\*(.+?)\*\*\*"), "bold_italic"),
             (re.compile(r"\*\*(.+?)\*\*"), "bold"),
-            (re.compile(r"(?<!\*)\*([^\*]+?)\*(?!\*)"), "italic"),
+            (re.compile(r"(?<!\*)\*([^*]+?)\*(?!\*)"), "italic"),
             (re.compile(r"`([^`]+)`"), "code"),
-            (re.compile(r"\[([^\]]+)\]\(([^\)]+)\)"), "link"),
+            (re.compile(r"\[([^\]]+)\]\(([^)]+)\)"), "link"),
         ]
 
     def highlightBlock(self, text: str) -> None:
@@ -145,16 +155,34 @@ class MarkdownHighlighter(QSyntaxHighlighter):
 
         for pattern, fmt_name in self.rules:
             for match in pattern.finditer(text):
-                fmt = getattr(self, f"{fmt_name}_fmt")
-                if fmt_name == "bold":
+                if fmt_name == "heading":
+                    # уровень по числу # в начале строки
+                    level = 0
+                    for ch in text:
+                        if ch == "#":
+                            level += 1
+                        else:
+                            break
+                    level = max(1, min(6, level))
+                    fmt = self.heading_fmts.get(level, self.heading_fmts[6])
+                    start, end = match.start(), match.end()
+                elif fmt_name == "bold_italic":
+                    fmt = self.bold_italic_fmt
+                    start, end = match.start() + 3, match.end() - 3
+                elif fmt_name == "bold":
+                    fmt = self.bold_fmt
                     start, end = match.start() + 2, match.end() - 2
                 elif fmt_name in ("italic", "code"):
+                    fmt = getattr(self, f"{fmt_name}_fmt")
                     start, end = match.start() + 1, match.end() - 1
                 else:
+                    fmt = getattr(self, f"{fmt_name}_fmt")
                     start, end = match.start(), match.end()
+
                 for i in range(max(0, start), min(n, end)):
                     formats[i] = fmt
 
+        # фон активной строки
         if is_active:
             for i in range(n):
                 if formats[i] is None:
@@ -164,6 +192,7 @@ class MarkdownHighlighter(QSyntaxHighlighter):
                     combined.setBackground(self.active_fmt.background())
                     formats[i] = combined
 
+        # применить подряд идущие одинаковые форматы
         i = 0
         while i < n:
             if formats[i] is not None:
@@ -181,8 +210,10 @@ class HeadingOutline(QListWidget):
 
     heading_activated = Signal(int)  # position в документе
 
-    _ATX_HEADING_RE  = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
-    _BOLD_HEADING_RE = re.compile(r"^(?<!\*)\*\*(?!\*)(?P<bold_text>.+?)(?<!\*)\*\*(?!\*)$", re.MULTILINE)
+    _ATX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+    _BOLD_HEADING_RE = re.compile(
+        r"^(?<!\*)\*\*(?!\*)(?P<bold_text>.+?)(?<!\*)\*\*(?!\*)$", re.MULTILINE
+    )
 
     def __init__(self, side: str = "left", parent=None):
         super().__init__(parent)
@@ -224,7 +255,7 @@ class HeadingOutline(QListWidget):
             for m in self._ATX_HEADING_RE.finditer(text):
                 yield m.start(), len(m.group(1)), m.group(2)
             for m in self._BOLD_HEADING_RE.finditer(text):
-                yield m.start(), 4, m.group(1)   # уровень для ** — на твой вкус
+                yield m.start(), 4, m.group(1)  # уровень для ** — на твой вкус
 
         for pos, level, title in sorted(_iter_headings(text), key=lambda t: t[0]):
             title = title.strip()
@@ -336,6 +367,103 @@ class CodeEditor(QPlainTextEdit):
             do_scroll = self._mouse_click
             self._mouse_click = False
             self.paragraph_clicked.emit(self.editor_idx, pos, do_scroll)
+
+    def keyPressEvent(self, event):
+        mods = event.modifiers()
+        key = event.key()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        if ctrl and not shift and key == Qt.Key.Key_B:
+            self.format_line("bold")
+            return
+        if ctrl and not shift and key == Qt.Key.Key_I:
+            self.format_line("italic")
+            return
+        if ctrl and shift and key == Qt.Key.Key_B:
+            self.format_line("bold_italic")
+            return
+        if ctrl and key in (
+            Qt.Key.Key_1,
+            Qt.Key.Key_2,
+            Qt.Key.Key_3,
+            Qt.Key.Key_4,
+            Qt.Key.Key_5,
+        ):
+            level = {
+                Qt.Key.Key_1: 1,
+                Qt.Key.Key_2: 2,
+                Qt.Key.Key_3: 3,
+                Qt.Key.Key_4: 4,
+                Qt.Key.Key_5: 5,
+            }[key]
+            self.format_line(f"h{level}")
+            return
+
+        super().keyPressEvent(event)
+
+    def format_line(self, kind: str) -> None:
+        """Форматирует текущий блок (строку/абзац Qt)."""
+        cursor = self.textCursor()
+        block = cursor.block()
+        if not block.isValid():
+            return
+
+        text = block.text()
+        start = block.position()
+
+        # --- заголовки ---
+        if kind.startswith("h") and kind[1:].isdigit():
+            level = int(kind[1])
+            level = max(1, min(6, level))
+            # убрать старые # в начале
+            body = re.sub(r"^#{1,6}\s*", "", text)
+            new_text = (
+                f"{'#' * level} {body.lstrip()}" if body.strip() else f"{'#' * level} "
+            )
+            cursor.beginEditBlock()
+            cursor.setPosition(start)
+            cursor.movePosition(
+                QTextCursor.MoveOperation.EndOfBlock,
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            cursor.insertText(new_text)
+            cursor.endEditBlock()
+            return
+
+        # --- bold / italic / bold_italic ---
+        markers = {
+            "bold": "**",
+            "italic": "*",
+            "bold_italic": "***",
+        }
+        if kind not in markers:
+            return
+        m = markers[kind]
+
+        # снять уже существующую обёртку *, **, *** с краёв
+        core = text
+        core = re.sub(r"^(\*{1,3})", "", core)
+        core = re.sub(r"(\*{1,3})$", "", core)
+        # если повторно нажали тот же стиль — toggle: оставить без маркеров
+        stripped = text.strip()
+        if (
+            stripped.startswith(m)
+            and stripped.endswith(m)
+            and len(stripped) >= 2 * len(m)
+        ):
+            new_text = core
+        else:
+            new_text = f"{m}{core}{m}"
+
+        cursor.beginEditBlock()
+        cursor.setPosition(start)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.EndOfBlock,
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        cursor.insertText(new_text)
+        cursor.endEditBlock()
 
     def highlight_line_at(self, pos: int, color: QColor) -> None:
         """Подсветка одной конкретной строки (на всю ширину), без текстового selection."""
