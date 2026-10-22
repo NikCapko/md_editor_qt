@@ -1080,7 +1080,9 @@ class TagChip(QWidget):
 
         # рисуем текст
         painter.setPen(fg)
-        painter.setFont(self.font())
+        font = QFont("Segoe UI", 10)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text)
 
     def mousePressEvent(self, event):
