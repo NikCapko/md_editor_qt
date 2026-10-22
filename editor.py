@@ -833,7 +833,7 @@ class FindReplaceDialog(QDialog):
         pat = self._pattern()
         if pat is None:
             return
-        repl = self.replace_edit.text()
+        repl = self.replace_edit.currentText()
         editor = self.main.editor
         cursor = editor.textCursor()
         if not cursor.hasSelection():
@@ -865,7 +865,7 @@ class FindReplaceDialog(QDialog):
         pat = self._pattern()
         if pat is None:
             return
-        repl = self.replace_edit.text()
+        repl = self.replace_edit.currentText()
         editor = self.main.editor
         text = editor.toPlainText()
         try:
