@@ -1270,7 +1270,6 @@ class MetadataDialog(QDialog):
 
         return {
             "title": self.title_edit.text().strip(),
-            "orig_name": self.orig_name_edit.text().strip(),
             "author": self.author_edit.text().strip(),
             "lang": "en-ru",
             "tags": selected_tags,
@@ -1663,17 +1662,9 @@ class MarkdownEditor(QMainWindow):
         self._save_file()
 
     def _bnf_path(self) -> Path | None:
-        """book.en.md / book.ru.md → book.bnf"""
+        """document.md → document.bnf"""
         if self._file_path:
-            base = str(self._file_path)
-            # base уже без .en.md/.ru.md
-            return Path(base + ".bnf")
-        if self._en_path:
-            p = self._en_path
-            name = p.name
-            if name.endswith(".en.md"):
-                return p.with_name(name[:-6] + ".bnf")
-            return p.with_suffix(".bnf")
+            return self._file_path.with_suffix(".bnf")
         return None
 
     def _load_bnf(self) -> dict:
