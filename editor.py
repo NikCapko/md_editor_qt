@@ -55,21 +55,8 @@ from PySide6.QtWidgets import (
 )
 
 from collapsible_widget import CollapsibleWidget
-
-# Опциональные импорты — если модулей нет, соответствующие функции отключатся.
-try:
-    from export_parallel import export_file  # type: ignore
-
-    _HAS_EXPORT = True
-except Exception:
-    _HAS_EXPORT = False
-
-try:
-    from text_corrector import normalize_text  # type: ignore
-
-    _HAS_CORRECTOR = True
-except Exception:
-    _HAS_CORRECTOR = False
+from export_parallel import export_file
+from text_corrector import normalize_text
 
 
 class NumberBar(QWidget):
@@ -895,7 +882,7 @@ DEFAULT_BNF = {
     "title": "",
     "orig_name": "",
     "author": "",
-    "lang": "en-ru",
+    "lang": "ru",
     "tags": [],
     "favorite": False,
     "description": "",
@@ -1468,8 +1455,6 @@ class MarkdownEditor(QMainWindow):
         self._theme_dark_action.setChecked(self._current_theme == "dark")
 
     def _correct_text(self) -> None:
-        if not _HAS_CORRECTOR:
-            return
         reply = QMessageBox.question(
             self,
             "Исправить текст",
