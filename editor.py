@@ -1099,7 +1099,7 @@ class MetadataDialog(QDialog):
     """Редактор метаданных книги (.bnf).
 
     schema:
-      title, orig_name, author, lang (статично «en-ru»),
+      title, orig_name, author, lang (статично «ru»),
       tags (list), favorite (bool), description
     """
 
@@ -1150,10 +1150,10 @@ class MetadataDialog(QDialog):
         form.addRow("Автор:", self.author_edit)
 
         # lang — статично en-ru
-        self.lang_edit = QLineEdit("en-ru")
+        self.lang_edit = QLineEdit("ru")
         self.lang_edit.setReadOnly(True)
         self.lang_edit.setStyleSheet("background: #f0f0f0; color: #555;")
-        self.lang_edit.setToolTip("Пока фиксированное значение en-ru")
+        self.lang_edit.setToolTip("Пока фиксированное значение ru")
         form.addRow("Язык:", self.lang_edit)
 
         self.favorite_cb = QCheckBox()
@@ -1258,7 +1258,7 @@ class MetadataDialog(QDialog):
         return {
             "title": self.title_edit.text().strip(),
             "author": self.author_edit.text().strip(),
-            "lang": "en-ru",
+            "lang": "ru",
             "tags": selected_tags,
             "favorite": self.favorite_cb.isChecked(),
             "description": self.description_edit.toPlainText().strip(),
