@@ -1412,6 +1412,82 @@ class MarkdownEditor(QMainWindow):
         # Обновляем галочки в меню
         self._update_theme_menu()
 
+    MAX_RECENT_FILES = 10
+    _RECENT_FILES_KEY = "recent_files"
+
+    def _load_recent_files(self) -> list[str]:
+        """Загрузить список недавних файлов из QSettings."""
+        s = QSettings()
+        files = s.value(self._RECENT_FILES_KEY, [], type=list) or []
+        return [str(f) for f in files]
+
+    def _save_recent_files(self, files: list[str]) -> None:
+        """Сохранить список недавних файлов в QSettings."""
+        QSettings().setValue(self._RECENT_FILES_KEY, files)
+
+    def _add_recent_file(self, path: str) -> None:
+        """Добавить файл в начало списка недавних (без дубликатов, макс. MAX_RECENT_FILES)."""
+        if not path:
+            return
+        files = self._load_recent_files()
+        # Убираем существующее вхождение
+        files = [f for f in files if f != path]
+        # Вставляем в начало
+        files.insert(0, path)
+        # Ограничиваем длину
+        files = files[: self.MAX_RECENT_FILES]
+        self._save_recent_files(files)
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self) -> None:
+        """Перестроить подменю «Недавние файлы»."""
+        if not hasattr(self, "_recent_menu"):
+            return
+
+        self._recent_menu.clear()
+        files = self._load_recent_files()
+
+        if not files:
+            empty_action = self._recent_menu.addAction("(пусто)")
+            empty_action.setEnabled(False)
+        else:
+            for path in files:
+                # Показываем только имя файла, полный путь — в tooltip
+                name = Path(path).name
+                action = self._recent_menu.addAction(name)
+                action.setToolTip(path)
+                action.triggered.connect(lambda checked=False, p=path: self._open_recent_file(p))
+
+            self._recent_menu.addSeparator()
+            clear_action = self._recent_menu.addAction("Очистить список")
+            clear_action.triggered.connect(self._clear_recent_files)
+
+    def _open_recent_file(self, path: str) -> None:
+        """Открыть файл из списка недавних."""
+        p = Path(path)
+        if not p.exists():
+            reply = QMessageBox.warning(
+                self,
+                "Файл не найден",
+                f"Файл не существует:\n{path}\n\nУдалить его из списка недавних?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                files = self._load_recent_files()
+                files = [f for f in files if f != path]
+                self._save_recent_files(files)
+                self._rebuild_recent_menu()
+            return
+
+        self._file_path = p
+        self._load_file()
+        self._add_recent_file(str(p))
+
+    def _clear_recent_files(self) -> None:
+        """Очистить список недавних файлов."""
+        self._save_recent_files([])
+        self._rebuild_recent_menu()
+
     def _create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("&Файл")
@@ -1436,6 +1512,10 @@ class MarkdownEditor(QMainWindow):
         meta_action.setShortcut(QKeySequence("Ctrl+M"))
         meta_action.triggered.connect(self._edit_metadata)
         file_menu.addAction(meta_action)
+
+        # --- Недавние файлы ---
+        self._recent_menu = file_menu.addMenu("Недавние файлы")
+        self._rebuild_recent_menu()
 
         file_menu.addSeparator()
         export_pdf_action = QAction("Экспорт в PDF…", self)
@@ -1671,6 +1751,7 @@ class MarkdownEditor(QMainWindow):
 
         self._file_path = Path(file_path)
         self._load_file()
+        self._add_recent_file(file_path)
 
     def _load_file(self) -> None:
         if self._file_path and self._file_path.exists():
@@ -1815,6 +1896,7 @@ def main():
         file_path = sys.argv[1]
         window._file_path = Path(file_path)
         window._load_file()
+        window._add_recent_file(file_path)
 
     sys.exit(app.exec())
 
