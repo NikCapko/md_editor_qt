@@ -1341,14 +1341,12 @@ class MarkdownEditor(QMainWindow):
         self.editor.cursorPositionChanged.connect(self._update_active_heading)
         self.outline.heading_activated.connect(self._goto_heading)
 
-        self.setStatusBar(QStatusBar())
+        self._setup_status_bar()
         self._create_menu()
 
         # Применяем сохранённую тему
         saved_theme = QSettings().value("ui/theme", "light")
         self.apply_theme(saved_theme)
-
-        self.statusBar().showMessage("Готов")
 
     def apply_theme(self, theme: str) -> None:
         """Применяет светлую или тёмную тему ко всему приложению."""
@@ -1404,6 +1402,7 @@ class MarkdownEditor(QMainWindow):
         self.collapsible.set_theme(theme)
         self.editor.set_theme(theme)
         self.outline.set_theme(theme)
+        self._update_status_bar_theme()
 
         # Сохраняем выбор
         QSettings().setValue("ui/theme", theme)
@@ -1487,6 +1486,109 @@ class MarkdownEditor(QMainWindow):
         """Очистить список недавних файлов."""
         self._save_recent_files([])
         self._rebuild_recent_menu()
+
+    def _setup_status_bar(self) -> None:
+        """Создать статус-бар с информативными виджетами."""
+        status_bar = QStatusBar()
+        self.setStatusBar(status_bar)
+
+        # Виджеты для статистики
+        self._lbl_position = QLabel()
+        self._lbl_position.setMinimumWidth(160)
+
+        self._lbl_words = QLabel()
+        self._lbl_words.setMinimumWidth(120)
+
+        self._lbl_chars = QLabel()
+        self._lbl_chars.setMinimumWidth(160)
+
+        self._lbl_reading_time = QLabel()
+        self._lbl_reading_time.setMinimumWidth(120)
+
+        # Добавляем виджеты в статус-бар с разделителями
+        status_bar.addPermanentWidget(self._lbl_position)
+        status_bar.addPermanentWidget(self._make_separator())
+        status_bar.addPermanentWidget(self._lbl_words)
+        status_bar.addPermanentWidget(self._make_separator())
+        status_bar.addPermanentWidget(self._lbl_chars)
+        status_bar.addPermanentWidget(self._make_separator())
+        status_bar.addPermanentWidget(self._lbl_reading_time)
+
+        # Подключаем сигналы
+        self.editor.cursorPositionChanged.connect(self._update_position_info)
+        self.editor.textChanged.connect(self._update_text_stats)
+
+        # Применяем текущую тему
+        self._update_status_bar_theme()
+
+        # Первичное обновление
+        self._update_position_info()
+        self._update_text_stats()
+
+    def _make_separator(self) -> QLabel:
+        """Создать вертикальный разделитель."""
+        sep = QLabel("|")
+        return sep
+
+    def _update_status_bar_theme(self) -> None:
+        """Обновить цвета статус-бара в зависимости от темы."""
+        # Текст наследует цвет от темы приложения — ничего не задаём
+        # Только разделители делаем заметными, но ненавязчивыми
+        if self._current_theme == "dark":
+            sep_color = "#555555"
+        else:
+            sep_color = "#bbbbbb"
+
+        sep_style = f"color: {sep_color}; padding: 0 4px;"
+
+        # Убираем фон и цвет текста — они наследуются от темы
+        for label in (self._lbl_position, self._lbl_words, self._lbl_chars, self._lbl_reading_time):
+            label.setStyleSheet("padding: 0 4px;")
+
+        # Обновляем разделители
+        layout = self.statusBar().layout()
+        if layout:
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item:
+                    widget = item.widget()
+                    if widget and isinstance(widget, QLabel) and widget.text() == "|":
+                        widget.setStyleSheet(sep_style)
+
+    def _update_position_info(self) -> None:
+        """Обновить информацию о позиции курсора."""
+        cursor = self.editor.textCursor()
+        line = cursor.blockNumber() + 1
+        col = cursor.columnNumber() + 1
+        self._lbl_position.setText(f"Строка {line}, Столбец {col}")
+
+    def _update_text_stats(self) -> None:
+        """Обновить статистику текста (слова, символы, время чтения)."""
+        text = self.editor.toPlainText()
+
+        # Символы
+        total_chars = len(text)
+        chars_no_spaces = len(text.replace(" ", "").replace("\n", "").replace("\t", ""))
+
+        # Слова — разбиваем по пробелам и переводу строк, фильтруем пустые
+        words = [w for w in re.split(r"[\s\n\r\t]+", text) if w]
+        word_count = len(words)
+
+        # Время чтения (средняя скорость ~200 слов/мин)
+        reading_minutes = max(1, round(word_count / 200)) if word_count > 0 else 0
+
+        # Форматирование
+        self._lbl_words.setText(f"Слов: {word_count:,}".replace(",", " "))
+        self._lbl_chars.setText(f"Символов: {total_chars:,} / {chars_no_spaces:,}".replace(",", " "))
+
+        if word_count == 0:
+            self._lbl_reading_time.setText("Чтение: —")
+        elif reading_minutes < 60:
+            self._lbl_reading_time.setText(f"~{reading_minutes} мин чтения")
+        else:
+            hours = reading_minutes // 60
+            mins = reading_minutes % 60
+            self._lbl_reading_time.setText(f"~{hours} ч {mins} мин чтения")
 
     def _create_menu(self):
         menubar = self.menuBar()
