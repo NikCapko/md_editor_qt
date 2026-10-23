@@ -1740,7 +1740,7 @@ class MarkdownEditor(QMainWindow):
         if self.editor.textCursor().hasSelection():
             sel = self.editor.textCursor().selectedText().replace(chr(0x2029), chr(10))
             if sel and chr(10) not in sel:
-                dlg.find_edit.setText(sel)
+                dlg.find_edit.setEditText(sel)
 
         dlg.set_replace_mode(replace_mode)
         dlg.find_edit.setFocus()
