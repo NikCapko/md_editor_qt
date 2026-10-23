@@ -28,6 +28,7 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -361,7 +362,9 @@ class HeadingOutline(QListWidget):
                 item = self.item(best_idx)
                 if item is not None:
                     # Центрировать элемент
-                    self.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    self.scrollToItem(
+                        item, QAbstractItemView.ScrollHint.PositionAtCenter
+                    )
 
         self._updating = False
 
@@ -1501,15 +1504,39 @@ class MarkdownEditor(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        # --- Сохраняем позицию курсора и скролла ---
+        cursor_pos = self.editor.textCursor().position()
+        scrollbar = self.editor.verticalScrollBar()
+        old_scroll_value = scrollbar.value()
+        old_scroll_max = scrollbar.maximum()
+        # Запоминаем относительную позицию скролла (0.0 ... 1.0)
+        scroll_ratio = old_scroll_value / old_scroll_max if old_scroll_max > 0 else 0.0
+
         text = self.editor.toPlainText()
         path = self._file_path or Path("document.md")
         new_text = normalize_text(text, path)
 
-        pos = self.editor.textCursor().position()
+        # --- Применяем коррекцию ---
         self.editor.setPlainText(new_text)
+
+        # --- Восстанавливаем курсор ---
+        new_pos = min(cursor_pos, max(0, len(new_text)))
         c = self.editor.textCursor()
-        c.setPosition(min(pos, max(0, len(new_text) - 1)))
+        c.setPosition(new_pos)
         self.editor.setTextCursor(c)
+
+        # --- Восстанавливаем скролл ---
+        new_scroll_max = scrollbar.maximum()
+        if new_scroll_max > 0:
+            # Если текст сильно изменился, используем относительную позицию
+            # Иначе — пытаемся восстановить абсолютное значение
+            if abs(new_scroll_max - old_scroll_max) < old_scroll_max * 0.3:
+                scrollbar.setValue(min(old_scroll_value, new_scroll_max))
+            else:
+                scrollbar.setValue(int(scroll_ratio * new_scroll_max))
+
+        # Центрируем курсор на экране, чтобы пользователь видел контекст
+        self.editor.centerCursor()
 
         self._modified = True
         self._update_title()
