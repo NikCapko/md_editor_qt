@@ -895,27 +895,63 @@ class FindReplaceDialog(QDialog):
         repl = self.replace_edit.currentText()
         editor = self.main.editor
         text = editor.toPlainText()
+
+        # Собираем все совпадения заранее
+        matches = list(pat.finditer(text))
+        if not matches:
+            self.status.setText("Нечего заменять")
+            self.status.setStyleSheet("color: #c5221f;")
+            return
+
+        # Запоминаем позицию курсора до замены
+        old_pos = editor.textCursor().position()
+
+        # Начинаем единый undo-блок
+        cursor = editor.textCursor()
+        cursor.beginEditBlock()
+
+        replaced_count = 0
         try:
-            new_text, n = pat.subn(repl, text)
-        except re.error as e:
+            # Заменяем с конца к началу, чтобы позиции не сдвигались
+            for m in reversed(matches):
+                try:
+                    if self.regex_cb.isChecked():
+                        new = pat.sub(repl, m.group(), count=1)
+                    else:
+                        new = repl
+                except re.error as e:
+                    self.status.setText(f"Ошибка замены: {e}")
+                    self.status.setStyleSheet("color: #c5221f;")
+                    cursor.endEditBlock()
+                    return
+
+                cursor.setPosition(m.start())
+                cursor.setPosition(m.end(), QTextCursor.MoveMode.KeepAnchor)
+                cursor.insertText(new)
+                replaced_count += 1
+        except Exception as e:
+            cursor.endEditBlock()
             self.status.setText(f"Ошибка замены: {e}")
             self.status.setStyleSheet("color: #c5221f;")
             return
-        if n:
-            pos = editor.textCursor().position()
-            editor.setPlainText(new_text)
-            c = editor.textCursor()
-            c.setPosition(min(pos, len(new_text)))
-            editor.setTextCursor(c)
-            self._remember(self.find_edit, self._combo_text(self.find_edit))
-            self.status.setText(f"Заменено: {n}")
-            self.status.setStyleSheet("color: #188038;")
-            pat2 = self._pattern()
-            if pat2 is not None:
-                self._highlight_all(pat2)
-        else:
-            self.status.setText("Нечего заменять")
-            self.status.setStyleSheet("color: #c5221f;")
+
+        cursor.endEditBlock()
+
+        # Восстанавливаем позицию курсора (с защитой от выхода за границы)
+        new_text = editor.toPlainText()
+        restore_pos = min(old_pos, len(new_text))
+        c = editor.textCursor()
+        c.setPosition(restore_pos)
+        editor.setTextCursor(c)
+
+        self._remember(self.find_edit, self._combo_text(self.find_edit))
+        self.status.setText(f"Заменено: {replaced_count}")
+        self.status.setStyleSheet("color: #188038;")
+
+        # Обновляем подсветку оставшихся вхождений
+        pat2 = self._pattern()
+        if pat2 is not None:
+            self._highlight_all(pat2)
 
 
 DEFAULT_BNF = {
