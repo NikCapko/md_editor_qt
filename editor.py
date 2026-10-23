@@ -1713,14 +1713,14 @@ class MarkdownEditor(QMainWindow):
         self._theme_dark_action.setChecked(self._current_theme == "dark")
 
     def _correct_text(self) -> None:
-        reply = QMessageBox.question(
-            self,
-            "Исправить текст",
-            "Применить правила корректировки ко всему тексту?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+        #reply = QMessageBox.question(
+        #    self,
+        #    "Исправить текст",
+        #    "Применить правила корректировки ко всему тексту?",
+        #    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        #)
+        #if reply != QMessageBox.StandardButton.Yes:
+        #    return
 
         # --- Сохраняем позицию курсора и скролла ---
         cursor_pos = self.editor.textCursor().position()
