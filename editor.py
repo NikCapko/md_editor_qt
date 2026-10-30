@@ -254,8 +254,8 @@ class HeadingOutline(QListWidget):
         super().__init__(parent)
         self._headings: list[tuple[int, int, str]] = []
         self._updating = False
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(260)
+        self.setMinimumWidth(250)
+        self.setMaximumWidth(250)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self._theme = "light"
@@ -1366,7 +1366,7 @@ class MarkdownEditor(QMainWindow):
         self.collapsible.add_widget(self.outline)
         # Фиксируем ширину контейнера — как у самого Outline
         self.collapsible.setMinimumWidth(0)
-        self.collapsible.setMaximumWidth(200)
+        self.collapsible.setMaximumWidth(250)
 
         self.editor = CodeEditor()
 
@@ -1491,7 +1491,9 @@ class MarkdownEditor(QMainWindow):
                 name = Path(path).name
                 action = self._recent_menu.addAction(name)
                 action.setToolTip(path)
-                action.triggered.connect(lambda checked=False, p=path: self._open_recent_file(p))
+                action.triggered.connect(
+                    lambda checked=False, p=path: self._open_recent_file(p)
+                )
 
             self._recent_menu.addSeparator()
             clear_action = self._recent_menu.addAction("Очистить список")
@@ -1578,7 +1580,12 @@ class MarkdownEditor(QMainWindow):
         sep_style = f"color: {sep_color}; padding: 0 4px;"
 
         # Убираем фон и цвет текста — они наследуются от темы
-        for label in (self._lbl_position, self._lbl_words, self._lbl_chars, self._lbl_reading_time):
+        for label in (
+            self._lbl_position,
+            self._lbl_words,
+            self._lbl_chars,
+            self._lbl_reading_time,
+        ):
             label.setStyleSheet("padding: 0 4px;")
 
         # Обновляем разделители
@@ -1615,7 +1622,9 @@ class MarkdownEditor(QMainWindow):
 
         # Форматирование
         self._lbl_words.setText(f"Слов: {word_count:,}".replace(",", " "))
-        self._lbl_chars.setText(f"Символов: {total_chars:,} / {chars_no_spaces:,}".replace(",", " "))
+        self._lbl_chars.setText(
+            f"Символов: {total_chars:,} / {chars_no_spaces:,}".replace(",", " ")
+        )
 
         if word_count == 0:
             self._lbl_reading_time.setText("Чтение: —")
@@ -1713,13 +1722,13 @@ class MarkdownEditor(QMainWindow):
         self._theme_dark_action.setChecked(self._current_theme == "dark")
 
     def _correct_text(self) -> None:
-        #reply = QMessageBox.question(
+        # reply = QMessageBox.question(
         #    self,
         #    "Исправить текст",
         #    "Применить правила корректировки ко всему тексту?",
         #    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        #)
-        #if reply != QMessageBox.StandardButton.Yes:
+        # )
+        # if reply != QMessageBox.StandardButton.Yes:
         #    return
 
         # --- Сохраняем позицию курсора и скролла ---
