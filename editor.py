@@ -1366,7 +1366,7 @@ class MarkdownEditor(QMainWindow):
         self.collapsible.add_widget(self.outline)
         # Фиксируем ширину контейнера — как у самого Outline
         self.collapsible.setMinimumWidth(0)
-        self.collapsible.setMaximumWidth(250)
+        self.collapsible.setMaximumWidth(252)
 
         self.editor = CodeEditor()
 
@@ -1427,12 +1427,31 @@ class MarkdownEditor(QMainWindow):
                 QMenu { background-color: #353535; color: #ffffff; border: 1px solid #555555; }
                 QMenu::item:selected { background-color: #2a82da; }
                 QStatusBar { background-color: #252526; color: #cccccc; }
+                QScrollBar:vertical { background: #1e1e1e; width: 10px; margin: 0 }
+                QScrollBar::handle:vertical { background: #3c3c3c; min-height: 20px; border-radius: 5px; }
+                QScrollBar::handle:vertical:hover { background: #505050; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+                QScrollBar:horizontal { background: #1e1e1e; height: 10px; margin: 0 }
+                QScrollBar::handle:horizontal { background: #3c3c3c; min-width: 20px; border-radius: 5px; }
+                QScrollBar::handle:horizontal:hover { background: #505050; }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
                 """
             )
         else:
             app.setStyle("Fusion")
             app.setPalette(app.style().standardPalette())
-            app.setStyleSheet("")
+            app.setStyleSheet(
+                """
+                QScrollBar:vertical { background: #f5f5f5; width: 10px; margin: 0 }
+                QScrollBar::handle:vertical { background: #c8c8c8; min-height: 20px; border-radius: 5px;}
+                QScrollBar::handle:vertical:hover { background: #b0b0b0; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+                QScrollBar:horizontal { background: #f5f5f5; height: 10px; margin: 0 }
+                QScrollBar::handle:horizontal { background: #c8c8c8; min-width: 20px; border-radius: 5px; }
+                QScrollBar::handle:horizontal:hover { background: #b0b0b0; }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+                """
+            )
 
         # Обновляем кастомные виджеты
         self.collapsible.set_theme(theme)
