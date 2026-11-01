@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSettings, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QPoint, QRect, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -404,6 +404,8 @@ class CodeEditor(QPlainTextEdit):
         self.number_bar = NumberBar(self)
         self.highlighter = MarkdownHighlighter(self)
 
+        self._is_typing = False
+
         # Цвета подсветки поиска (зависят от темы)
         self._search_all_color = QColor("#fff59d")
         self._search_current_bg = QColor("#ff9800")
@@ -458,14 +460,18 @@ class CodeEditor(QPlainTextEdit):
     def _on_cursor_changed(self):
         cursor = self.textCursor()
         current_block = cursor.block()
-        if self.highlighter.prev_block_number >= 0:
-            prev_block = self.document().findBlockByNumber(
-                self.highlighter.prev_block_number
-            )
-            if prev_block.isValid():
-                self.highlighter.rehighlightBlock(prev_block)
-        self.highlighter.rehighlightBlock(current_block)
-        self.highlighter.prev_block_number = current_block.blockNumber()
+        current_block_num = current_block.blockNumber()
+
+        # Перерисовывать только при смене блока (а не при каждом движении курсора)
+        if self.highlighter.prev_block_number != current_block_num:
+            if self.highlighter.prev_block_number >= 0:
+                prev_block = self.document().findBlockByNumber(
+                    self.highlighter.prev_block_number
+                )
+                if prev_block.isValid():
+                    self.highlighter.rehighlightBlock(prev_block)
+                    self.highlighter.rehighlightBlock(current_block)
+                    self.highlighter.prev_block_number = current_block_num
 
     def keyPressEvent(self, event):
         mods = event.modifiers()
@@ -1351,6 +1357,12 @@ class MarkdownEditor(QMainWindow):
         self._file_path: Path | None = None
         self._modified = False
 
+        # Debounce для оглавлений
+        self._outline_timer = QTimer()
+        self._outline_timer.setSingleShot(True)
+        self._outline_timer.setInterval(1000)
+        self._outline_timer.timeout.connect(self._rebuild_outline)
+
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
@@ -1890,8 +1902,8 @@ class MarkdownEditor(QMainWindow):
     def _on_text_changed(self) -> None:
         self._modified = True
         name = self._file_path.name if self._file_path else "Новый документ"
-        self.outline.rebuild(self.editor.toPlainText())
-        self._update_active_heading()
+        # Отложить rebuild оглавления
+        self._schedule_outline_rebuild("en")
         self._update_title()
 
     def _update_active_heading(self) -> None:
@@ -2048,6 +2060,25 @@ class MarkdownEditor(QMainWindow):
                 event.ignore()
         else:
             event.accept()
+
+    def _schedule_outline_rebuild(self, side: str) -> None:
+        """Запланировать пересборку оглавления с debounce."""
+        self._outline_timer.start()
+
+    def _rebuild_outline(self) -> None:
+        text = self.editor.toPlainText()
+        self.outline.rebuild(text)
+        self._update_active_heading()
+        self._update_outline_status(self.collapsible, text)
+
+    def _update_outline_status(self, collapsible: CollapsibleWidget, text: str) -> None:
+        """Показать количество заголовков в статусе сворачиваемой панели."""
+        count = len(list(HeadingOutline._ATX_HEADING_RE.finditer(text)))
+        count += len(list(HeadingOutline._BOLD_HEADING_RE.finditer(text)))
+        if count == 0:
+            collapsible.set_status("нет заголовков", "#888888")
+        else:
+            collapsible.set_status(f"▼ {count}", "#1a73e8")
 
 
 def main():
